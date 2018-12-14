@@ -72,5 +72,31 @@ flush privileges;
 connect(localhost,user1,,test,MYSQL_PORT,MYSQL_SOCK);
 connect con1,localhost,user1;
 ERROR HY000: This account was previously locked using the LOCK USER statement
+#
+# JSON functions on global_priv reflect the locking state of an account
+#
+lock user user1@localhost;
+select host, user, JSON_VALUE(Priv, '$.is_locked') from mysql.global_priv where user='user1';
+host	user	JSON_VALUE(Priv, '$.is_locked')
+localhost	user1	1
+unlock user user1@localhost;
+select host, user, JSON_VALUE(Priv, '$.is_locked') from mysql.global_priv where user='user1';
+host	user	JSON_VALUE(Priv, '$.is_locked')
+localhost	user1	0
+#
+# SHOW GRANTS correctly displays the account locking state for an user
+#
+show grants for user1@localhost;
+Grants for user1@localhost
+GRANT USAGE ON *.* TO 'user1'@'localhost'
+lock user user1@localhost;
+show grants for user1@localhost;
+Grants for user1@localhost
+GRANT USAGE ON *.* TO 'user1'@'localhost'
+LOCK USER 'user1'@'localhost'
+unlock user user1@localhost;
+show grants for user1@localhost;
+Grants for user1@localhost
+GRANT USAGE ON *.* TO 'user1'@'localhost'
 drop user user1@localhost;
 drop user user2@localhost;

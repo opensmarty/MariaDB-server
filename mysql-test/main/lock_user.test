@@ -94,6 +94,24 @@ flush privileges;
 --error ER_LOCKED_ACCOUNT
 connect(con1,localhost,user1);
 
+--echo #
+--echo # JSON functions on global_priv reflect the locking state of an account
+--echo #
+
+lock user user1@localhost;
+select host, user, JSON_VALUE(Priv, '$.is_locked') from mysql.global_priv where user='user1';
+unlock user user1@localhost;
+select host, user, JSON_VALUE(Priv, '$.is_locked') from mysql.global_priv where user='user1';
+
+--echo #
+--echo # SHOW GRANTS correctly displays the account locking state for an user
+--echo #
+
+show grants for user1@localhost;
+lock user user1@localhost;
+show grants for user1@localhost;
+unlock user user1@localhost;
+show grants for user1@localhost;
+
 drop user user1@localhost;
 drop user user2@localhost;
-

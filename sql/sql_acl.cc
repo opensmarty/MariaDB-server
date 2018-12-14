@@ -8774,11 +8774,11 @@ static bool show_account_locked(THD *thd, const char *username,
 
   String grant(buff,sizeof(buff),system_charset_info);
   grant.length(0);
-  grant.append(STRING_WITH_LEN("USER ACCOUNT: '"));
+  grant.append(STRING_WITH_LEN("LOCK USER '"));
   grant.append(user);
   grant.append(STRING_WITH_LEN("'@'"));
   grant.append(host);
-  grant.append(STRING_WITH_LEN("' IS LOCKED"));
+  grant.append(STRING_WITH_LEN("'"));
 
   protocol->prepare_for_resend();
   protocol->store(grant.ptr(),grant.length(),grant.charset());
@@ -10613,7 +10613,6 @@ int mysql_lock_user(THD* thd, List<LEX_USER> &users_list, bool lock_cmd)
   char user_key[MAX_KEY_LENGTH];
   int result= 0;
   int error;
-  const char *lock_or_unlock = lock_cmd ? "Y" : "N";
   String wrong_users;
 
   DBUG_ASSERT(!thd->is_current_stmt_binlog_format_row());
@@ -10685,7 +10684,7 @@ int mysql_lock_user(THD* thd, List<LEX_USER> &users_list, bool lock_cmd)
       continue;
     }
 
-    user_table.set_is_locked(lock_or_unlock);
+    user_table.set_is_locked(lock_cmd);
     store_record(table, record[1]);
 
     if (unlikely(error= table->file->ha_update_row(table->record[1],
