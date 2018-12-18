@@ -3026,7 +3026,7 @@ int select_export::send_data(List<Item> &items)
         push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
                             ER_TRUNCATED_WRONG_VALUE_FOR_FIELD,
                             ER_THD(thd, WARN_DATA_TRUNCATED),
-                            item->name, static_cast<long>(row_count));
+                            "xxxxxx", static_cast<long>(row_count));
       }
       else if (copier.source_end_pos() < res->ptr() + res->length())
       { 
