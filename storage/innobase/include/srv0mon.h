@@ -15,7 +15,7 @@ Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 ***********************************************************************/
 
@@ -30,6 +30,7 @@ Created 12/15/2009	Jimmy Yang
 #define srv0mon_h
 
 #include "univ.i"
+#include "my_atomic.h"
 
 #ifndef __STDC_LIMIT_MACROS
 /* Required for FreeBSD so that INT64_MAX is defined. */

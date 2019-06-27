@@ -41,7 +41,7 @@ class ha_tokudb;
 
 typedef struct loader_context {
     THD* thd;
-    char write_status_msg[200];
+    char write_status_msg[1024];
     ha_tokudb* ha;
 } *LOADER_CONTEXT;
 
@@ -871,6 +871,7 @@ public:
     bool primary_key_is_clustered() {
         return true;
     }
+    bool is_clustering_key(uint index);
     int cmp_ref(const uchar * ref1, const uchar * ref2);
     bool check_if_incompatible_data(HA_CREATE_INFO * info, uint table_changes);
 
@@ -914,6 +915,9 @@ public:
 
     Item* idx_cond_push(uint keyno, class Item* idx_cond);
     void cancel_pushed_idx_cond();
+
+    bool can_convert_varstring(const Field_varstring* field,
+                               const Column_definition&new_type) const;
 
 #if defined(TOKU_INCLUDE_ALTER_56) && TOKU_INCLUDE_ALTER_56
  public:

@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -313,6 +313,25 @@ public:
 	{
 		return(m_last_os_error);
 	}
+
+	/** Check whether the file is empty.
+	@return true if file is empty */
+	bool	is_empty_file()		const
+	{
+#ifdef _WIN32
+		os_offset_t	offset =
+			(os_offset_t) m_file_info.nFileSizeLow
+			| ((os_offset_t) m_file_info.nFileSizeHigh << 32);
+
+		return (offset == 0);
+#else
+		return (m_file_info.st_size == 0);
+#endif
+	}
+
+	/** Check if the file exist.
+	@return true if file exists. */
+	bool exists()	const { return m_exists; }
 
 	/** Test if the filepath provided looks the same as this filepath
 	by string comparison. If they are two different paths to the same

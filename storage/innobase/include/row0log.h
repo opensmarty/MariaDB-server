@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -36,7 +36,7 @@ Created 2011-05-26 Marko Makela
 
 class ut_stage_alter_t;
 
-extern ulint onlineddl_rowlog_rows;
+extern Atomic_counter<ulint> onlineddl_rowlog_rows;
 extern ulint onlineddl_rowlog_pct_used;
 extern ulint onlineddl_pct_progress;
 

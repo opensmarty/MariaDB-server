@@ -676,7 +676,7 @@ static void rocksdb_set_rocksdb_info_log_level(
   RDB_MUTEX_LOCK_CHECK(rdb_sysvars_mutex);
   rocksdb_info_log_level = *static_cast<const uint64_t *>(save);
   rocksdb_db_options->info_log->SetInfoLogLevel(
-      static_cast<const rocksdb::InfoLogLevel>(rocksdb_info_log_level));
+      static_cast<rocksdb::InfoLogLevel>(rocksdb_info_log_level));
   RDB_MUTEX_UNLOCK_CHECK(rdb_sysvars_mutex);
 }
 
@@ -3290,9 +3290,9 @@ void Rdb_snapshot_notifier::SnapshotCreated(
 std::multiset<Rdb_transaction *> Rdb_transaction::s_tx_list;
 mysql_mutex_t Rdb_transaction::s_tx_list_mutex;
 
-static Rdb_transaction *&get_tx_from_thd(THD *const thd) {
-  return *reinterpret_cast<Rdb_transaction **>(
-      my_core::thd_ha_data(thd, rocksdb_hton));
+static Rdb_transaction *get_tx_from_thd(THD *const thd) {
+  return reinterpret_cast<Rdb_transaction *>(
+      my_core::thd_get_ha_data(thd, rocksdb_hton));
 }
 
 namespace {
@@ -3339,7 +3339,7 @@ class Rdb_perf_context_guard {
 */
 
 static Rdb_transaction *get_or_create_tx(THD *const thd) {
-  Rdb_transaction *&tx = get_tx_from_thd(thd);
+  Rdb_transaction *tx = get_tx_from_thd(thd);
   // TODO: this is called too many times.. O(#rows)
   if (tx == nullptr) {
     bool rpl_skip_tx_api= false; // MARIAROCKS_NOT_YET.
@@ -3354,6 +3354,7 @@ static Rdb_transaction *get_or_create_tx(THD *const thd) {
     }
     tx->set_params(THDVAR(thd, lock_wait_timeout), THDVAR(thd, max_row_locks));
     tx->start_tx();
+    my_core::thd_set_ha_data(thd, rocksdb_hton, tx);
   } else {
     tx->set_params(THDVAR(thd, lock_wait_timeout), THDVAR(thd, max_row_locks));
     if (!tx->is_tx_started()) {
@@ -3365,7 +3366,7 @@ static Rdb_transaction *get_or_create_tx(THD *const thd) {
 }
 
 static int rocksdb_close_connection(handlerton *const hton, THD *const thd) {
-  Rdb_transaction *&tx = get_tx_from_thd(thd);
+  Rdb_transaction *tx = get_tx_from_thd(thd);
   if (tx != nullptr) {
     int rc = tx->finish_bulk_load(false);
     if (rc != 0) {
@@ -3376,7 +3377,6 @@ static int rocksdb_close_connection(handlerton *const hton, THD *const thd) {
     }
 
     delete tx;
-    tx = nullptr;
   }
   return HA_EXIT_SUCCESS;
 }
@@ -3444,7 +3444,7 @@ static int rocksdb_prepare(handlerton* hton, THD* thd, bool prepare_tx)
 {
   bool async=false; // This is "ASYNC_COMMIT" feature which is only present in webscalesql
 
-  Rdb_transaction *&tx = get_tx_from_thd(thd);
+  Rdb_transaction *tx = get_tx_from_thd(thd);
   if (!tx->can_prepare()) {
     return HA_EXIT_FAILURE;
   }
@@ -3695,7 +3695,7 @@ static void rocksdb_commit_ordered(handlerton *hton, THD* thd, bool all)
   // Same assert as InnoDB has
   DBUG_ASSERT(all || (!thd_test_options(thd, OPTION_NOT_AUTOCOMMIT |
                                              OPTION_BEGIN)));
-  Rdb_transaction *&tx = get_tx_from_thd(thd);
+  Rdb_transaction *tx = get_tx_from_thd(thd);
   if (!tx->is_two_phase()) {
     /*
       ordered_commit is supposedly slower as it is done sequentially
@@ -3727,7 +3727,7 @@ static int rocksdb_commit(handlerton* hton, THD* thd, bool commit_tx)
   rocksdb::StopWatchNano timer(rocksdb::Env::Default(), true);
 
   /* note: h->external_lock(F_UNLCK) is called after this function is called) */
-  Rdb_transaction *&tx = get_tx_from_thd(thd);
+  Rdb_transaction *tx = get_tx_from_thd(thd);
 
   /* this will trigger saving of perf_context information */
   Rdb_perf_context_guard guard(tx, rocksdb_perf_context_level(thd));
@@ -3750,26 +3750,37 @@ static int rocksdb_commit(handlerton* hton, THD* thd, bool commit_tx)
          - For a COMMIT statement that finishes a multi-statement transaction
          - For a statement that has its own transaction
       */
-
-      //  First, commit without syncing. This establishes the commit order
-      tx->set_sync(false);
-      bool tx_had_writes = tx->get_write_count()? true : false ;
-      if (tx->commit()) {
-        DBUG_RETURN(HA_ERR_ROCKSDB_COMMIT_FAILED);
-      }
-      thd_wakeup_subsequent_commits(thd, 0);
-
-      if (tx_had_writes && rocksdb_flush_log_at_trx_commit == FLUSH_LOG_SYNC)
+      if (thd->slave_thread)
       {
-        rocksdb::Status s= rdb->FlushWAL(true);
-        if (!s.ok())
-          DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+        // An attempt to make parallel slave performant (not fully successful,
+        // see MDEV-15372):
+
+        //  First, commit without syncing. This establishes the commit order
+        tx->set_sync(false);
+        bool tx_had_writes = tx->get_write_count()? true : false ;
+        if (tx->commit()) {
+          DBUG_RETURN(HA_ERR_ROCKSDB_COMMIT_FAILED);
+        }
+        thd_wakeup_subsequent_commits(thd, 0);
+
+        if (tx_had_writes && rocksdb_flush_log_at_trx_commit == FLUSH_LOG_SYNC)
+        {
+          rocksdb::Status s= rdb->FlushWAL(true);
+          if (!s.ok())
+            DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+        }
+      }
+      else
+      {
+        /* Not a slave thread */
+        if (tx->commit()) {
+          DBUG_RETURN(HA_ERR_ROCKSDB_COMMIT_FAILED);
+        }
       }
     } else {
       /*
         We get here when committing a statement within a transaction.
       */
-      tx->make_stmt_savepoint_permanent();
       tx->make_stmt_savepoint_permanent();
     }
 
@@ -3789,7 +3800,7 @@ static int rocksdb_commit(handlerton* hton, THD* thd, bool commit_tx)
 
 static int rocksdb_rollback(handlerton *const hton, THD *const thd,
                             bool rollback_tx) {
-  Rdb_transaction *&tx = get_tx_from_thd(thd);
+  Rdb_transaction *tx = get_tx_from_thd(thd);
   Rdb_perf_context_guard guard(tx, rocksdb_perf_context_level(thd));
 
   if (tx != nullptr) {
@@ -4596,7 +4607,7 @@ static int rocksdb_savepoint(handlerton *const hton, THD *const thd,
 
 static int rocksdb_rollback_to_savepoint(handlerton *const hton, THD *const thd,
                                          void *const savepoint) {
-  Rdb_transaction *&tx = get_tx_from_thd(thd);
+  Rdb_transaction *tx = get_tx_from_thd(thd);
   return tx->rollback_to_savepoint(savepoint);
 }
 
@@ -5333,49 +5344,6 @@ static int rocksdb_done_func(void *const p) {
     // Looks like we are getting unloaded and yet we have some open tables
     // left behind.
     error = 1;
-  }
-
-  /*
-    MariaDB: When the plugin is unloaded with UNINSTALL SONAME command, some
-    connections may still have Rdb_transaction objects.
-
-    These objects are not genuine transactions (as SQL layer makes sure that
-    a plugin that is being unloaded has no open tables), they are empty
-    Rdb_transaction objects that were left there to save on object
-    creation/deletion.
-
-    Go through the list and delete them.
-  */
-  {
-    class Rdb_trx_deleter: public Rdb_tx_list_walker {
-    public:
-      std::set<Rdb_transaction*> rdb_trxs;
-
-      void process_tran(const Rdb_transaction *const tx) override {
-        /*
-          Check if the transaction is really empty. We only check
-          non-WriteBatch-based transactions, because there is no easy way to
-          check WriteBatch-based transactions.
-        */
-        if (!tx->is_writebatch_trx()) {
-          const auto tx_impl = static_cast<const Rdb_transaction_impl *>(tx);
-          DBUG_ASSERT(tx_impl);
-          if (tx_impl->get_rdb_trx())
-            DBUG_ASSERT(0);
-        }
-        rdb_trxs.insert((Rdb_transaction*)tx);
-      };
-    } deleter;
-
-    Rdb_transaction::walk_tx_list(&deleter);
-
-    for (std::set<Rdb_transaction*>::iterator it= deleter.rdb_trxs.begin();
-         it != deleter.rdb_trxs.end();
-         ++it)
-    {
-      // When a transaction is deleted, it removes itself from s_tx_list.
-      delete *it;
-    }
   }
 
   /*
@@ -8777,7 +8745,7 @@ int ha_rocksdb::check(THD *const thd, HA_CHECK_OPT *const check_opt) {
       int res;
       // NO_LINT_DEBUG
       sql_print_verbose_info("CHECKTABLE %s:   Checking index %s", table_name,
-                             table->key_info[keyno].name);
+                             table->key_info[keyno].name.str);
       while (1) {
         if (!rows)
           res = index_first(table->record[0]);
@@ -10756,6 +10724,11 @@ int ha_rocksdb::info(uint flag) {
         stats.data_file_length += m_table_handler->m_mtcache_size;
       }
 
+      // Do like InnoDB does. stats.records=0 confuses the optimizer
+      if (stats.records == 0 && !(flag & (HA_STATUS_TIME | HA_STATUS_OPEN))) {
+        stats.records++;
+      }
+
       if (rocksdb_debug_optimizer_n_rows > 0)
         stats.records = rocksdb_debug_optimizer_n_rows;
     }
@@ -11061,6 +11034,41 @@ void ha_rocksdb::read_thd_vars(THD *const thd) {
   m_checksums_pct = THDVAR(thd, checksums_pct);
 }
 
+ulonglong ha_rocksdb::table_flags() const
+{
+  DBUG_ENTER_FUNC();
+
+  /*
+    HA_BINLOG_STMT_CAPABLE
+    Upstream:  MyRocks advertises itself as it supports SBR, but has additional
+      checks in ha_rocksdb::external_lock()/ start_stmt() which will return an
+      error if one tries to run the statement.
+      Exceptions: @@rocksdb_unsafe_for_binlog or we are an SQL slave thread.
+
+    MariaDB: Inform the upper layer we don't support SBR, so it switches to RBR
+      if possible. The exceptions are the same as with the upstream.
+
+    HA_REC_NOT_IN_SEQ
+      If we don't set it, filesort crashes, because it assumes rowids are
+      1..8 byte numbers
+    HA_PRIMARY_KEY_IN_READ_INDEX
+      This flag is always set, even for tables that:
+      - have no PK
+      - have some (or all) of PK that can't be decoded from the secondary
+        index.
+  */
+  THD *thd= ha_thd();
+  DBUG_RETURN(HA_BINLOG_ROW_CAPABLE |
+              ((thd && (THDVAR(thd, unsafe_for_binlog) ||thd->rgi_slave))?
+                HA_BINLOG_STMT_CAPABLE : 0) |
+              HA_REC_NOT_IN_SEQ | HA_CAN_INDEX_BLOBS |
+              HA_PRIMARY_KEY_IN_READ_INDEX |
+              HA_PRIMARY_KEY_REQUIRED_FOR_POSITION | HA_NULL_IN_KEY |
+              HA_PARTIAL_COLUMN_READ |
+              HA_TABLE_SCAN_ON_INDEX);
+}
+
+
 
 /**
   @return
@@ -11073,6 +11081,9 @@ int ha_rocksdb::external_lock(THD *const thd, int lock_type) {
   DBUG_ASSERT(thd != nullptr);
 
   int res = HA_EXIT_SUCCESS;
+#if 0
+  // MariaDB uses a different way to implement this, see ha_rocksdb::table_flags
+
   int binlog_format = my_core::thd_binlog_format(thd);
   bool unsafe_for_binlog = THDVAR(ha_thd(), unsafe_for_binlog);
 
@@ -11101,6 +11112,7 @@ int ha_rocksdb::external_lock(THD *const thd, int lock_type) {
     my_error(ER_REQUIRE_ROW_BINLOG_FORMAT, MYF(0));
     DBUG_RETURN(HA_ERR_UNSUPPORTED);
   }
+#endif
 
   if (lock_type == F_UNLCK) {
     Rdb_transaction *const tx = get_tx_from_thd(thd);
@@ -11202,20 +11214,6 @@ int ha_rocksdb::external_lock(THD *const thd, int lock_type) {
 
 int ha_rocksdb::start_stmt(THD *const thd, thr_lock_type lock_type) {
   DBUG_ENTER_FUNC();
-
-  /*
-    MariaDB: the following is a copy of the check in ha_rocksdb::external_lock:
-  */
-  int binlog_format = my_core::thd_binlog_format(thd);
-  bool unsafe_for_binlog = THDVAR(ha_thd(), unsafe_for_binlog);
-  if (lock_type >= TL_WRITE_ALLOW_WRITE &&
-      !thd->rgi_slave && !unsafe_for_binlog &&
-      binlog_format != BINLOG_FORMAT_ROW &&
-      binlog_format != BINLOG_FORMAT_UNSPEC &&
-      my_core::thd_binlog_filter_ok(thd)) {
-    my_error(ER_REQUIRE_ROW_BINLOG_FORMAT, MYF(0));
-    DBUG_RETURN(HA_ERR_UNSUPPORTED);
-  }
 
   DBUG_ASSERT(thd != nullptr);
 
@@ -13822,7 +13820,7 @@ int rocksdb_check_bulk_load(
     return 1;
   }
 
-  Rdb_transaction *&tx = get_tx_from_thd(thd);
+  Rdb_transaction *tx = get_tx_from_thd(thd);
   if (tx != nullptr) {
     const int rc = tx->finish_bulk_load();
     if (rc != 0) {

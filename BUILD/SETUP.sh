@@ -15,7 +15,7 @@
 # You should have received a copy of the GNU Library General Public
 # License along with this library; if not, write to the Free
 # Software Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
-# MA 02110-1301, USA
+# MA 02110-1335  USA
 
 ########################################################################
 
@@ -141,7 +141,7 @@ elif [ "x$warning_mode" = "xmaintainer" ]; then
   debug_extra_cflags="-g3"
 else
 # Both C and C++ warnings
-  warnings="-Wall -Wextra -Wunused -Wwrite-strings -Wno-uninitialized -Wno-strict-aliasing"
+  warnings="-Wall -Wextra -Wunused -Wwrite-strings -Wno-uninitialized -Wno-strict-aliasing -Wimplicit-fallthrough=2"
 
 # For more warnings, uncomment the following line
 # warnings="$warnings -Wshadow"
@@ -170,7 +170,7 @@ debug_cflags="-DEXTRA_DEBUG -DSAFE_MUTEX -DSAFEMALLOC"
 error_inject="--with-error-inject "
 #
 # Base C++ flags for all builds
-base_cxxflags="-felide-constructors -fexceptions -fno-rtti"
+base_cxxflags="-felide-constructors -fexceptions"
 #
 # Flags for optimizing builds.
 # Be as fast as we can be without losing our ability to backtrace.

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -74,7 +74,7 @@ trx_sysf_get(mtr_t* mtr, bool rw = true)
 {
 	buf_block_t* block = buf_page_get(
 		page_id_t(TRX_SYS_SPACE, TRX_SYS_PAGE_NO),
-		univ_page_size, rw ? RW_X_LATCH : RW_S_LATCH, mtr);
+		0, rw ? RW_X_LATCH : RW_S_LATCH, mtr);
 	if (block) {
 		buf_block_dbg_add_level(block, SYNC_TRX_SYS_HEADER);
 	}
@@ -369,7 +369,7 @@ struct rw_trx_hash_element_t
 
 
   trx_id_t id; /* lf_hash_init() relies on this to be first in the struct */
-  trx_id_t no;
+  Atomic_counter<trx_id_t> no;
   trx_t *trx;
   ib_mutex_t mutex;
 };
@@ -431,6 +431,7 @@ class rw_trx_hash_t
     if (trx_t *trx= element->trx)
     {
       ut_ad(trx_state_eq(trx, TRX_STATE_PREPARED) ||
+            trx_state_eq(trx, TRX_STATE_PREPARED_RECOVERED) ||
             (trx_state_eq(trx, TRX_STATE_ACTIVE) &&
              (!srv_was_started ||
               srv_read_only_mode ||
@@ -515,6 +516,7 @@ class rw_trx_hash_t
     ut_ad(!trx_is_autocommit_non_locking(trx));
     mutex_enter(&trx->mutex);
     ut_ad(trx_state_eq(trx, TRX_STATE_ACTIVE) ||
+          trx_state_eq(trx, TRX_STATE_PREPARED_RECOVERED) ||
           trx_state_eq(trx, TRX_STATE_PREPARED));
     mutex_exit(&trx->mutex);
   }
@@ -704,11 +706,7 @@ public:
     because it may change even before this method returns.
   */
 
-  uint32_t size()
-  {
-    return uint32_t(my_atomic_load32_explicit(&hash.count,
-					      MY_MEMORY_ORDER_RELAXED));
-  }
+  uint32_t size() { return uint32_t(lf_hash_size(&hash)); }
 
 
   /**
@@ -790,7 +788,7 @@ class trx_sys_t
     The smallest number not yet assigned as a transaction id or transaction
     number. Accessed and updated with atomic operations.
   */
-  MY_ALIGNED(CACHE_LINE_SIZE) trx_id_t m_max_trx_id;
+  MY_ALIGNED(CACHE_LINE_SIZE) Atomic_counter<trx_id_t> m_max_trx_id;
 
 
   /**
@@ -801,17 +799,17 @@ class trx_sys_t
     @sa assign_new_trx_no()
     @sa snapshot_ids()
   */
-  MY_ALIGNED(CACHE_LINE_SIZE) trx_id_t m_rw_trx_hash_version;
+  MY_ALIGNED(CACHE_LINE_SIZE) std::atomic<trx_id_t> m_rw_trx_hash_version;
 
-
-  /**
-    TRX_RSEG_HISTORY list length (number of committed transactions to purge)
-  */
-  MY_ALIGNED(CACHE_LINE_SIZE) int32 rseg_history_len;
 
   bool m_initialised;
 
 public:
+  /**
+    TRX_RSEG_HISTORY list length (number of committed transactions to purge)
+  */
+  MY_ALIGNED(CACHE_LINE_SIZE) Atomic_counter<uint32_t> rseg_history_len;
+
   /** Mutex protecting trx_list. */
   MY_ALIGNED(CACHE_LINE_SIZE) mutable TrxSysMutex mutex;
 
@@ -887,9 +885,7 @@ public:
 
   trx_id_t get_max_trx_id()
   {
-    return static_cast<trx_id_t>
-           (my_atomic_load64_explicit(reinterpret_cast<int64*>(&m_max_trx_id),
-                                      MY_MEMORY_ORDER_RELAXED));
+    return m_max_trx_id;
   }
 
 
@@ -931,9 +927,7 @@ public:
   void assign_new_trx_no(trx_t *trx)
   {
     trx->no= get_new_trx_id_no_refresh();
-    my_atomic_store64_explicit(reinterpret_cast<int64*>
-                               (&trx->rw_trx_hash_element->no),
-                               trx->no, MY_MEMORY_ORDER_RELAXED);
+    trx->rw_trx_hash_element->no= trx->no;
     refresh_rw_trx_hash_version();
   }
 
@@ -984,7 +978,8 @@ public:
   /** Initialiser for m_max_trx_id and m_rw_trx_hash_version. */
   void init_max_trx_id(trx_id_t value)
   {
-    m_max_trx_id= m_rw_trx_hash_version= value;
+    m_max_trx_id= value;
+    m_rw_trx_hash_version.store(value, std::memory_order_relaxed);
   }
 
 
@@ -1106,22 +1101,6 @@ public:
     return count;
   }
 
-  /** @return number of committed transactions waiting for purge */
-  ulint history_size() const
-  {
-    return uint32(my_atomic_load32(&const_cast<trx_sys_t*>(this)
-                                   ->rseg_history_len));
-  }
-  /** Add to the TRX_RSEG_HISTORY length (on database startup). */
-  void history_add(int32 len)
-  {
-    my_atomic_add32(&rseg_history_len, len);
-  }
-  /** Register a committed transaction. */
-  void history_insert() { history_add(1); }
-  /** Note that a committed transaction was purged. */
-  void history_remove() { history_add(-1); }
-
 private:
   static my_bool get_min_trx_id_callback(rw_trx_hash_element_t *element,
                                          trx_id_t *id)
@@ -1152,8 +1131,7 @@ private:
   {
     if (element->id < arg->m_id)
     {
-      trx_id_t no= static_cast<trx_id_t>(my_atomic_load64_explicit(
-        reinterpret_cast<int64*>(&element->no), MY_MEMORY_ORDER_RELAXED));
+      trx_id_t no= element->no;
       arg->m_ids->push_back(element->id);
       if (no < arg->m_no)
         arg->m_no= no;
@@ -1165,18 +1143,14 @@ private:
   /** Getter for m_rw_trx_hash_version, must issue ACQUIRE memory barrier. */
   trx_id_t get_rw_trx_hash_version()
   {
-    return static_cast<trx_id_t>
-           (my_atomic_load64_explicit(reinterpret_cast<int64*>
-                                      (&m_rw_trx_hash_version),
-                                      MY_MEMORY_ORDER_ACQUIRE));
+    return m_rw_trx_hash_version.load(std::memory_order_acquire);
   }
 
 
   /** Increments m_rw_trx_hash_version, must issue RELEASE memory barrier. */
   void refresh_rw_trx_hash_version()
   {
-    my_atomic_add64_explicit(reinterpret_cast<int64*>(&m_rw_trx_hash_version),
-                             1, MY_MEMORY_ORDER_RELEASE);
+    m_rw_trx_hash_version.fetch_add(1, std::memory_order_release);
   }
 
 
@@ -1195,8 +1169,7 @@ private:
 
   trx_id_t get_new_trx_id_no_refresh()
   {
-    return static_cast<trx_id_t>(my_atomic_add64_explicit(
-      reinterpret_cast<int64*>(&m_max_trx_id), 1, MY_MEMORY_ORDER_RELAXED));
+    return m_max_trx_id++;
   }
 };
 

@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /* Read record based on a key */
 
@@ -120,7 +120,9 @@ int mi_rkey(MI_INFO *info, uchar *buf, int inx, const uchar *key,
               (search_flag != HA_READ_KEY_EXACT ||
               last_used_keyseg != keyinfo->seg + keyinfo->keysegs)) ||
              (info->index_cond_func && 
-              (res= mi_check_index_cond(info, inx, buf)) == ICP_NO_MATCH))
+              (res= mi_check_index_cond(info, inx, buf)) == ICP_NO_MATCH) ||
+	     (mi_check_rowid_filter_is_active(info) &&
+	      !mi_check_rowid_filter(info)))
       {
         uint not_used[2];
         /*

@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2011, 2018 MariaDB Corporation
+   Copyright (c) 2011, 2019, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -28,6 +28,8 @@ static char pam_debug = 0;
 #define PAM_DEBUG(X)   /* no-op */
 #endif
 
+static char winbind_hack = 0;
+
 static char *opt_plugin_dir; /* To be dynamically linked. */
 static const char *tool_name= "auth_pam_tool_dir/auth_pam_tool";
 static const int tool_name_len= 31;
@@ -36,8 +38,8 @@ static int pam_auth(MYSQL_PLUGIN_VIO *vio, MYSQL_SERVER_AUTH_INFO *info)
 {
   int p_to_c[2], c_to_p[2]; /* Parent-to-child and child-to-parent pipes. */
   pid_t proc_id;
-  int result= CR_ERROR;
-  unsigned char field;
+  int result= CR_ERROR, pkt_len;
+  unsigned char field, *pkt;
 
   PAM_DEBUG((stderr, "PAM: opening pipes.\n"));
   if (pipe(p_to_c) < 0 || pipe(c_to_p) < 0)
@@ -96,15 +98,25 @@ static int pam_auth(MYSQL_PLUGIN_VIO *vio, MYSQL_SERVER_AUTH_INFO *info)
       close(c_to_p[1]) < 0)
     goto error_ret;
 
+  /* no user name yet ? read the client handshake packet with the user name */
+  if (info->user_name == 0)
+  {
+    if ((pkt_len= vio->read_packet(vio, &pkt) < 0))
+      return CR_ERROR;
+  }
+  else
+    pkt= NULL;
 
   PAM_DEBUG((stderr, "PAM: parent sends user data [%s], [%s].\n",
                info->user_name, info->auth_string));
 
 #ifndef DBUG_OFF
-  field= pam_debug;
+  field= pam_debug ? 1 : 0;
 #else
   field= 0;
 #endif
+  field|= winbind_hack ? 2 : 0;
+
   if (write(p_to_c[1], &field, 1) != 1 ||
       write_string(p_to_c[1], (const uchar *) info->user_name,
                                        info->user_name_length) ||
@@ -140,23 +152,27 @@ static int pam_auth(MYSQL_PLUGIN_VIO *vio, MYSQL_SERVER_AUTH_INFO *info)
       {
         unsigned char buf[10240];
         int buf_len;
-        unsigned char *pkt;
 
         PAM_DEBUG((stderr, "PAM: getting CONV string.\n"));
         if ((buf_len= read_string(c_to_p[0], (char *) buf, sizeof(buf))) < 0)
           goto error_ret;
 
-        PAM_DEBUG((stderr, "PAM: sending CONV string.\n"));
-        if (vio->write_packet(vio, buf, buf_len))
-          goto error_ret;
+        if (!pkt || (buf[0] >> 1) != 2)
+        {
+          PAM_DEBUG((stderr, "PAM: sending CONV string.\n"));
+          if (vio->write_packet(vio, buf, buf_len))
+            goto error_ret;
 
-        PAM_DEBUG((stderr, "PAM: reading CONV answer.\n"));
-        if ((buf_len= vio->read_packet(vio, &pkt)) < 0)
-          goto error_ret;
+          PAM_DEBUG((stderr, "PAM: reading CONV answer.\n"));
+          if ((pkt_len= vio->read_packet(vio, &pkt)) < 0)
+            goto error_ret;
+        }
 
         PAM_DEBUG((stderr, "PAM: answering CONV.\n"));
-        if (write_string(p_to_c[1], pkt, buf_len))
+        if (write_string(p_to_c[1], pkt, pkt_len))
           goto error_ret;
+
+        pkt= NULL;
       }
       break;
 
@@ -202,6 +218,6 @@ maria_declare_plugin(pam)
   NULL,
   vars,
   "2.0",
-  MariaDB_PLUGIN_MATURITY_BETA
+  MariaDB_PLUGIN_MATURITY_GAMMA
 }
 maria_declare_plugin_end;

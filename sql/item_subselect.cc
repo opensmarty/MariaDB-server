@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /**
   @file
@@ -54,7 +54,8 @@ Item_subselect::Item_subselect(THD *thd_arg):
   value_assigned(0), own_engine(0), thd(0), old_engine(0),
   have_to_be_excluded(0),
   inside_first_fix_fields(0), done_first_fix_fields(FALSE), 
-  expr_cache(0), forced_const(FALSE), substitution(0), engine(0), eliminated(FALSE),
+  expr_cache(0), forced_const(FALSE), expensive_fl(FALSE),
+  substitution(0), engine(0), eliminated(FALSE),
   changed(0), is_correlated(FALSE), with_recursive_reference(0)
 {
   DBUG_ENTER("Item_subselect::Item_subselect");
@@ -274,7 +275,7 @@ bool Item_subselect::fix_fields(THD *thd_param, Item **ref)
   {
     if (sl->tvc)
     {
-      wrap_tvc_in_derived_table(thd, sl);
+      wrap_tvc_into_select(thd, sl);
     }
   }
   
@@ -585,6 +586,9 @@ bool Item_subselect::is_expensive()
   double examined_rows= 0;
   bool all_are_simple= true;
 
+  if (!expensive_fl && is_evaluated())
+    return false;
+
   /* check extremely simple select */
   if (!unit->first_select()->next_select()) // no union
   {
@@ -595,7 +599,7 @@ bool Item_subselect::is_expensive()
     SELECT_LEX *sl= unit->first_select();
     JOIN *join = sl->join;
     if (join && !join->tables_list && !sl->first_inner_unit())
-      return false;
+      return (expensive_fl= false);
   }
 
 
@@ -605,14 +609,14 @@ bool Item_subselect::is_expensive()
 
     /* not optimized subquery */
     if (!cur_join)
-      return true;
+      return (expensive_fl= true);
 
     /*
       If the subquery is not optimised or in the process of optimization
       it supposed to be expensive
     */
     if (cur_join->optimization_state != JOIN::OPTIMIZATION_DONE)
-      return true;
+      return (expensive_fl= true);
 
     if (!cur_join->tables_list && !sl->first_inner_unit())
       continue;
@@ -634,7 +638,7 @@ bool Item_subselect::is_expensive()
       considered optimized if it has a join plan.
     */
     if (!cur_join->join_tab)
-      return true;
+      return (expensive_fl= true);
 
     if (sl->first_inner_unit())
     {
@@ -642,15 +646,15 @@ bool Item_subselect::is_expensive()
         Subqueries that contain subqueries are considered expensive.
         @todo: accumulate the cost of subqueries.
       */
-      return true;
+      return (expensive_fl= true);
     }
 
     examined_rows+= cur_join->get_examined_rows();
   }
 
   // here we are sure that subquery is optimized so thd is set
-  return !all_are_simple &&
-    (examined_rows > thd->variables.expensive_subquery_limit);
+  return (expensive_fl= !all_are_simple &&
+	   (examined_rows > thd->variables.expensive_subquery_limit));
 }
 
 
@@ -715,6 +719,15 @@ bool Item_subselect::exec()
   DBUG_ENTER("Item_subselect::exec");
   DBUG_ASSERT(fixed);
 
+  DBUG_EXECUTE_IF("Item_subselect",
+    Item::Print print(this,
+      enum_query_type(QT_TO_SYSTEM_CHARSET |
+        QT_WITHOUT_INTRODUCERS));
+
+    push_warning_printf(thd, Sql_condition::WARN_LEVEL_NOTE,
+       ER_UNKNOWN_ERROR, "DBUG: Item_subselect::exec %.*s",
+       print.length(),print.ptr());
+  );
   /*
     Do not execute subselect in case of a fatal error
     or if the query has been killed.
@@ -1084,7 +1097,7 @@ void Item_maxmin_subselect::no_rows_in_result()
   */
   if (parsing_place != SELECT_LIST || const_item())
     return;
-  value= (new (thd->mem_root) Item_null(thd))->get_cache(thd);
+  value= get_cache(thd);
   null_value= 0;
   was_values= 0;
   make_const();
@@ -1102,7 +1115,7 @@ void Item_singlerow_subselect::no_rows_in_result()
   */
   if (parsing_place != SELECT_LIST || const_item())
     return;
-  value= (new (thd->mem_root) Item_null(thd))->get_cache(thd);
+  value= get_cache(thd);
   reset();
   make_const();
 }
@@ -2896,7 +2909,6 @@ bool Item_exists_subselect::exists2in_processor(void *opt_arg)
                                 !upper_not->is_top_level_item())) ||
       first_select->is_part_of_union() ||
       first_select->group_list.elements ||
-      first_select->order_list.elements ||
       join->having ||
       first_select->with_sum_func ||
       !first_select->leaf_tables.elements||
@@ -2904,8 +2916,31 @@ bool Item_exists_subselect::exists2in_processor(void *opt_arg)
       with_recursive_reference)
     DBUG_RETURN(FALSE);
 
-  DBUG_ASSERT(first_select->order_list.elements == 0 &&
-              first_select->group_list.elements == 0 &&
+  /*
+    EXISTS-to-IN coversion and ORDER BY ... LIMIT clause:
+
+    - "[ORDER BY ...] LIMIT n" clause with a non-zero n does not affect
+      the result of the EXISTS(...) predicate, and so we can discard
+      it during the conversion.
+    - "[ORDER BY ...] LIMIT m, n" can turn a non-empty resultset into empty
+      one, so it affects tthe EXISTS(...) result and cannot be discarded.
+
+    Disallow exists-to-in conversion if
+    (1). three is a LIMIT which is not a basic constant
+    (1a)  or is a "LIMIT 0" (see MDEV-19429)
+    (2).  there is an OFFSET clause
+  */
+  if ((first_select->select_limit &&                        // (1)
+       (!first_select->select_limit->basic_const_item() ||  // (1)
+        first_select->select_limit->val_uint() == 0)) ||    // (1a)
+      first_select->offset_limit)                           // (2)
+  {
+    DBUG_RETURN(FALSE);
+  }
+
+  /* Disallow the conversion if offset + limit exists */
+
+  DBUG_ASSERT(first_select->group_list.elements == 0 &&
               first_select->having == NULL);
 
   if (find_inner_outer_equalities(&join->conds, eqs))
@@ -2936,9 +2971,6 @@ bool Item_exists_subselect::exists2in_processor(void *opt_arg)
   if ((uint)eqs.elements() > (first_select->item_list.elements +
                               first_select->select_n_reserved))
     goto out;
-  /* It is simple query */
-  DBUG_ASSERT(first_select->join->all_fields.elements ==
-              first_select->item_list.elements);
 
   arena= thd->activate_stmt_arena_if_needed(&backup);
 
@@ -3194,21 +3226,6 @@ Item_in_subselect::select_in_like_transformer(JOIN *join)
 
   DBUG_ENTER("Item_in_subselect::select_in_like_transformer");
   DBUG_ASSERT(thd == join->thd);
-
-  /*
-    IN/SOME/ALL/ANY subqueries aren't support LIMIT clause. Without it
-    ORDER BY clause becomes meaningless thus we drop it here.
-  */
-  for (SELECT_LEX *sl= current->master_unit()->first_select();
-       sl; sl= sl->next_select())
-  {
-    if (sl->join)
-    {
-      sl->join->order= 0;
-      sl->join->skip_sort_order= 1;
-    }
-  }
-
   thd->where= "IN/ALL/ANY subquery";
 
   /*
@@ -3272,7 +3289,8 @@ out:
 
 void Item_in_subselect::print(String *str, enum_query_type query_type)
 {
-  if (test_strategy(SUBS_IN_TO_EXISTS))
+  if (test_strategy(SUBS_IN_TO_EXISTS) &&
+      !(query_type & QT_PARSABLE))
     str->append(STRING_WITH_LEN("<exists>"));
   else
   {
@@ -3499,7 +3517,8 @@ Item_allany_subselect::select_transformer(JOIN *join)
 
 void Item_allany_subselect::print(String *str, enum_query_type query_type)
 {
-  if (test_strategy(SUBS_IN_TO_EXISTS))
+  if (test_strategy(SUBS_IN_TO_EXISTS) &&
+      !(query_type & QT_PARSABLE))
     str->append(STRING_WITH_LEN("<exists>"));
   else
   {
@@ -3894,7 +3913,6 @@ int subselect_single_select_engine::exec()
               tab->save_read_record= tab->read_record.read_record_func;
               tab->read_record.read_record_func= rr_sequential;
               tab->read_first_record= read_first_record_seq;
-              tab->read_record.record= tab->table->record[0];
               tab->read_record.thd= join->thd;
               tab->read_record.ref_length= tab->table->file->ref_length;
               tab->read_record.unlock_row= rr_unlock_row;
@@ -3912,7 +3930,6 @@ int subselect_single_select_engine::exec()
     for (JOIN_TAB **ptab= changed_tabs; ptab != last_changed_tab; ptab++)
     {
       JOIN_TAB *tab= *ptab;
-      tab->read_record.record= 0;
       tab->read_record.ref_length= 0;
       tab->read_first_record= tab->save_read_first_record;
       tab->read_record.read_record_func= tab->save_read_record;
@@ -5864,12 +5881,16 @@ Ordered_key::cmp_keys_by_row_data_and_rownum(Ordered_key *key,
 }
 
 
-void Ordered_key::sort_keys()
+bool Ordered_key::sort_keys()
 {
+  if (tbl->file->ha_rnd_init_with_error(0))
+    return TRUE;
   my_qsort2(key_buff, (size_t) key_buff_elements, sizeof(rownum_t),
             (qsort2_cmp) &cmp_keys_by_row_data_and_rownum, (void*) this);
   /* Invalidate the current row position. */
   cur_key_idx= HA_POS_ERROR;
+  tbl->file->ha_rnd_end();
+  return FALSE;
 }
 
 
@@ -6317,7 +6338,8 @@ subselect_rowid_merge_engine::init(MY_BITMAP *non_null_key_parts,
 
   /* Sort the keys in each of the indexes. */
   for (uint i= 0; i < merge_keys_count; i++)
-    merge_keys[i]->sort_keys();
+    if (merge_keys[i]->sort_keys())
+      return TRUE;
 
   if (init_queue(&pq, merge_keys_count, 0, FALSE,
                  subselect_rowid_merge_engine::cmp_keys_by_cur_rownum, NULL,

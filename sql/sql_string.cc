@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /* This file is originally from the mysql distribution. Coded by monty */
 
@@ -941,7 +941,28 @@ String *copy_if_not_alloced(String *to,String *from,uint32 from_length)
     (void) from->realloc(from_length);
     return from;
   }
-  if (to->realloc(from_length))
+  if (from->uses_buffer_owned_by(to))
+  {
+    DBUG_ASSERT(!from->is_alloced());
+    DBUG_ASSERT(to->is_alloced());
+    /*
+      "from" is a constant string pointing to a fragment of alloced string "to":
+        to=  xxxFFFyyy
+      - FFF is the part of "to" pointed by "from"
+      - xxx is the part of "to" before "from"
+      - yyy is the part of "to" after "from"
+    */
+    uint32 xxx_length= (uint32) (from->ptr() - to->ptr());
+    uint32 yyy_length= (uint32) (to->end() - from->end());
+    DBUG_ASSERT(to->length() >= yyy_length);
+    to->length(to->length() - yyy_length); // Remove the "yyy" part
+    DBUG_ASSERT(to->length() >= xxx_length);
+    to->replace(0, xxx_length, "", 0);     // Remove the "xxx" part
+    to->realloc(from_length);
+    to->set_charset(from->charset());
+    return to;
+  }
+  if (to->alloc(from_length))
     return from;				// Actually an error
   if ((to->str_length=MY_MIN(from->str_length,from_length)))
     memcpy(to->Ptr,from->Ptr,to->str_length);
@@ -1174,4 +1195,20 @@ uint convert_to_printable(char *to, size_t to_len,
   else
     *t= '\0';
   return (uint) (t - to);
+}
+
+size_t convert_to_printable_required_length(uint len)
+{
+  return static_cast<size_t>(len) * 4 +  3/*dots*/  + 1/*trailing \0 */;
+}
+
+bool String::append_semi_hex(const char *s, uint len, CHARSET_INFO *cs)
+{
+  size_t dst_len= convert_to_printable_required_length(len);
+  if (reserve(dst_len))
+    return true;
+  uint nbytes= convert_to_printable(Ptr + str_length, dst_len, s, len, cs);
+  DBUG_ASSERT((ulonglong) str_length + nbytes < UINT_MAX32);
+  str_length+= nbytes;
+  return false;
 }

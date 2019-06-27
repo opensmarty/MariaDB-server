@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /**
   @file
@@ -57,7 +57,7 @@ ulong tdc_size; /**< Table definition cache threshold for LRU eviction. */
 ulong tc_size; /**< Table cache threshold for LRU eviction. */
 uint32 tc_instances;
 uint32 tc_active_instances= 1;
-static uint32 tc_contention_warning_reported;
+static std::atomic<bool> tc_contention_warning_reported;
 
 /** Data collections. */
 static LF_HASH tdc_hash; /**< Collection of TABLE_SHARE objects. */
@@ -187,8 +187,8 @@ struct Table_cache_instance
                                   n_instances + 1);
           }
         }
-        else if (!my_atomic_fas32_explicit((int32*) &tc_contention_warning_reported,
-                                           1, MY_MEMORY_ORDER_RELAXED))
+        else if (!tc_contention_warning_reported.exchange(true,
+                                                 std::memory_order_relaxed))
         {
           sql_print_warning("Detected table cache mutex contention at instance %d: "
                             "%d%% waits. Additional table cache instance "
@@ -689,7 +689,7 @@ void tdc_deinit(void)
 
 ulong tdc_records(void)
 {
-  return my_atomic_load32_explicit(&tdc_hash.count, MY_MEMORY_ORDER_RELAXED);
+  return lf_hash_size(&tdc_hash);
 }
 
 
@@ -945,7 +945,7 @@ end:
       table existed?
       Let's return an invalid pointer here to catch dereferencing attempts.
     */
-    share= (TABLE_SHARE*) 1;
+    share= UNUSABLE_TABLE_SHARE;
   }
   DBUG_RETURN(share);
 

@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "myisamdef.h"
 #include "rt_index.h"
@@ -102,7 +102,9 @@ int mi_rnext(MI_INFO *info, uchar *buf, int inx)
     while ((info->s->concurrent_insert &&
             info->lastpos >= info->state->data_file_length) ||
            (info->index_cond_func &&
-           (icp_res= mi_check_index_cond(info, inx, buf)) == ICP_NO_MATCH))
+            (icp_res= mi_check_index_cond(info, inx, buf)) == ICP_NO_MATCH) ||
+           (mi_check_rowid_filter_is_active(info) &&
+	    !mi_check_rowid_filter(info)))
     {
       /*
         If we are at the last key on the key page, allow writers to

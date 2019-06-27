@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h"
 #include "sql_priv.h"
@@ -329,6 +329,7 @@ unpack_row(rpl_group_info *rgi,
                              (int) (pack_ptr - old_pack_ptr)));
         if (!pack_ptr)
         {
+#ifdef WITH_WSREP
 	  if (WSREP_ON)
           {
             /*
@@ -344,7 +345,7 @@ unpack_row(rpl_group_info *rgi,
                        (table_found) ? "found" : "not found", row_end
             );
 	  }
-
+#endif /* WITH_WSREP */
           rgi->rli->report(ERROR_LEVEL, ER_SLAVE_CORRUPT_EVENT,
                       rgi->gtid_info(),
                       "Could not read field '%s' of table '%s.%s'",

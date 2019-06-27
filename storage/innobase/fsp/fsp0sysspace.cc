@@ -12,7 +12,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -914,7 +914,7 @@ SysTablespace::open_or_create(
 			ut_ad(!fil_system.sys_space);
 			ut_ad(space_id() == TRX_SYS_SPACE);
 			space = fil_system.sys_space = fil_space_create(
-				name(), TRX_SYS_SPACE, flags(),
+				name(), TRX_SYS_SPACE, it->flags(),
 				FIL_TYPE_TABLESPACE, NULL);
 			if (!space) {
 				return DB_ERROR;

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2011, 2018, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -42,7 +42,15 @@ Created 2011-05-26 Marko Makela
 #include <algorithm>
 #include <map>
 
-ulint onlineddl_rowlog_rows;
+#ifdef HAVE_WOLFSSL
+// Workaround for MDEV-19582
+// (WolfSSL reads memory out of bounds with decryption/NOPAD)
+#define WOLFSSL_PAD_SIZE MY_AES_BLOCK_SIZE
+#else
+#define WOLFSSL_PAD_SIZE 0
+#endif
+
+Atomic_counter<ulint> onlineddl_rowlog_rows;
 ulint onlineddl_rowlog_pct_used;
 ulint onlineddl_pct_progress;
 
@@ -293,7 +301,8 @@ row_log_block_allocate(
 		);
 
 		log_buf.block = ut_allocator<byte>(mem_key_row_log_buf)
-			.allocate_large(srv_sort_buf_size, &log_buf.block_pfx);
+			.allocate_large(srv_sort_buf_size + WOLFSSL_PAD_SIZE,
+					&log_buf.block_pfx);
 
 		if (log_buf.block == NULL) {
 			DBUG_RETURN(false);
@@ -313,7 +322,8 @@ row_log_block_free(
 	DBUG_ENTER("row_log_block_free");
 	if (log_buf.block != NULL) {
 		ut_allocator<byte>(mem_key_row_log_buf).deallocate_large(
-			log_buf.block, &log_buf.block_pfx, log_buf.size);
+			log_buf.block, &log_buf.block_pfx,
+			log_buf.size + WOLFSSL_PAD_SIZE);
 		log_buf.block = NULL;
 	}
 	DBUG_VOID_RETURN;
@@ -445,11 +455,12 @@ row_log_online_op(
 		}
 
 		log->tail.blocks++;
-		if (!os_file_write(
+		if (os_file_write(
 			    request,
 			    "(modification log)",
 			    log->fd,
-			    buf, byte_offset, srv_sort_buf_size)) {
+			    buf, byte_offset, srv_sort_buf_size)
+		    != DB_SUCCESS) {
 write_failed:
 			/* We set the flag directly instead of invoking
 			dict_set_corrupted_index_cache_only(index) here,
@@ -583,11 +594,12 @@ row_log_table_close_func(
 		}
 
 		log->tail.blocks++;
-		if (!os_file_write(
+		if (os_file_write(
 			    request,
 			    "(modification log)",
 			    log->fd,
-			    buf, byte_offset, srv_sort_buf_size)) {
+			    buf, byte_offset, srv_sort_buf_size)
+		    != DB_SUCCESS) {
 write_failed:
 			log->error = DB_ONLINE_LOG_TOO_BIG;
 		}
@@ -605,7 +617,7 @@ write_failed:
 err_exit:
 	mutex_exit(&log->mutex);
 
-	my_atomic_addlint(&onlineddl_rowlog_rows, 1);
+	onlineddl_rowlog_rows++;
 	/* 10000 means 100.00%, 4525 means 45.25% */
 	onlineddl_rowlog_pct_used = static_cast<ulint>((log->tail.total * 10000) / srv_online_max_size);
 }
@@ -963,7 +975,8 @@ row_log_table_low(
 		break;
 	case FIL_PAGE_TYPE_INSTANT:
 		ut_ad(index->is_instant());
-		ut_ad(page_is_root(page_align(rec)));
+		ut_ad(!page_has_siblings(page_align(rec)));
+		ut_ad(page_get_page_no(page_align(rec)) == index->page);
 		break;
 	default:
 		ut_ad(!"wrong page type");
@@ -1139,7 +1152,7 @@ ALTER TABLE)
 table
 @param[in]	offsets		rec_get_offsets(rec)
 @param[in]	i		rec field corresponding to col
-@param[in]	page_size	page size of the old table
+@param[in]	zip_size	ROW_FORMAT=COMPRESSED size of the old table
 @param[in]	max_len		maximum length of dfield
 @param[in]	log		row log for the table
 @retval DB_INVALID_NULL		if a NULL value is encountered
@@ -1153,7 +1166,7 @@ row_log_table_get_pk_col(
 	const rec_t*		rec,
 	const ulint*		offsets,
 	ulint			i,
-	const page_size_t&	page_size,
+	ulint			zip_size,
 	ulint			max_len,
 	const row_log_t*	log)
 {
@@ -1192,7 +1205,7 @@ row_log_table_get_pk_col(
 			mem_heap_alloc(heap, field_len));
 
 		len = btr_copy_externally_stored_field_prefix(
-			blob_field, field_len, page_size, field, len);
+			blob_field, field_len, zip_size, field, len);
 		if (len >= max_len + 1) {
 			return(DB_TOO_BIG_INDEX_COL);
 		}
@@ -1307,8 +1320,7 @@ row_log_table_get_pk(
 
 		const ulint max_len = DICT_MAX_FIELD_LEN_BY_FORMAT(new_table);
 
-		const page_size_t&	page_size
-			= dict_table_page_size(index->table);
+		const ulint zip_size = index->table->space->zip_size();
 
 		for (ulint new_i = 0; new_i < new_n_uniq; new_i++) {
 			dict_field_t*	ifield;
@@ -1335,7 +1347,8 @@ row_log_table_get_pk(
 
 				log->error = row_log_table_get_pk_col(
 					ifield, dfield, *heap,
-					rec, offsets, i, page_size, max_len, log);
+					rec, offsets, i, zip_size, max_len,
+					log);
 
 				if (log->error != DB_SUCCESS) {
 err_exit:
@@ -1602,7 +1615,7 @@ row_log_table_apply_convert_mrec(
 
 			data = btr_rec_copy_externally_stored_field(
 				mrec, offsets,
-				dict_table_page_size(index->table),
+				index->table->space->zip_size(),
 				i, &len, heap);
 			ut_a(data);
 			dfield_set_data(dfield, data, len);
@@ -2234,7 +2247,10 @@ func_exit_committed:
 		row, NULL, index, heap, ROW_BUILD_NORMAL);
 	upd_t*		update	= row_upd_build_difference_binary(
 		index, entry, btr_pcur_get_rec(&pcur), cur_offsets,
-		false, NULL, heap, dup->table);
+		false, NULL, heap, dup->table, &error);
+	if (error != DB_SUCCESS) {
+		goto func_exit;
+	}
 
 	if (!update->n_fields) {
 		/* Nothing to do. */
@@ -2673,8 +2689,8 @@ ulint
 row_log_progress_inc_per_block()
 {
 	/* We must increment the progress once per page (as in
-	univ_page_size, usually 16KiB). One block here is srv_sort_buf_size
-	(usually 1MiB). */
+	srv_page_size, default = innodb_page_size=16KiB).
+	One block here is srv_sort_buf_size (usually 1MiB). */
 	const ulint	pages_per_block = std::max<ulint>(
 		ulint(srv_sort_buf_size >> srv_page_size_shift), 1);
 
@@ -2858,9 +2874,9 @@ all_done:
 		IORequest		request(IORequest::READ);
 		byte*			buf = index->online_log->head.block;
 
-		if (!os_file_read_no_error_handling(
+		if (os_file_read_no_error_handling(
 			    request, index->online_log->fd,
-			    buf, ofs, srv_sort_buf_size, 0)) {
+			    buf, ofs, srv_sort_buf_size, 0) != DB_SUCCESS) {
 			ib::error()
 				<< "Unable to read temporary file"
 				" for table " << index->table->name;
@@ -3105,7 +3121,7 @@ row_log_table_apply(
 
 	stage->begin_phase_log_table();
 
-	ut_ad(!rw_lock_own(dict_operation_lock, RW_LOCK_S));
+	ut_ad(!rw_lock_own(&dict_sys.latch, RW_LOCK_S));
 	clust_index = dict_table_get_first_index(old_table);
 
 	if (clust_index->online_log->n_rows == 0) {
@@ -3225,7 +3241,7 @@ row_log_allocate(
 	index->online_log = log;
 
 	if (log_tmp_is_encrypted()) {
-		ulint size = srv_sort_buf_size;
+		ulint size = srv_sort_buf_size + WOLFSSL_PAD_SIZE;
 		log->crypt_head = static_cast<byte *>(os_mem_alloc_large(&size));
 		log->crypt_tail = static_cast<byte *>(os_mem_alloc_large(&size));
 
@@ -3259,11 +3275,13 @@ row_log_free(
 	row_merge_file_destroy_low(log->fd);
 
 	if (log->crypt_head) {
-		os_mem_free_large(log->crypt_head, srv_sort_buf_size);
+		os_mem_free_large(log->crypt_head, srv_sort_buf_size
+				  + WOLFSSL_PAD_SIZE);
 	}
 
 	if (log->crypt_tail) {
-		os_mem_free_large(log->crypt_tail, srv_sort_buf_size);
+		os_mem_free_large(log->crypt_tail, srv_sort_buf_size
+				  + WOLFSSL_PAD_SIZE);
 	}
 
 	mutex_free(&log->mutex);
@@ -3762,9 +3780,9 @@ all_done:
 
 		byte*	buf = index->online_log->head.block;
 
-		if (!os_file_read_no_error_handling(
+		if (os_file_read_no_error_handling(
 			    request, index->online_log->fd,
-			    buf, ofs, srv_sort_buf_size, 0)) {
+			    buf, ofs, srv_sort_buf_size, 0) != DB_SUCCESS) {
 			ib::error()
 				<< "Unable to read temporary file"
 				" for index " << index->name;

@@ -60,6 +60,8 @@ static char pam_debug = 0;
 #define PAM_DEBUG(X)   /* no-op */
 #endif
 
+static char winbind_hack = 0;
+
 static int conv(int n, const struct pam_message **msg,
                 struct pam_response **resp, void *data)
 {
@@ -109,15 +111,10 @@ static int conv(int n, const struct pam_message **msg,
       param->buf[0] = msg[i]->msg_style == PAM_PROMPT_ECHO_ON ? 2 : 4;
       PAM_DEBUG((stderr, "PAM: conv: send(%.*s)\n",
                 (int)(param->ptr - param->buf - 1), param->buf));
-      if (write_packet(param, param->buf, param->ptr - param->buf - 1))
+      pkt_len= roundtrip(param, param->buf, param->ptr - param->buf - 1, &pkt);
+      if (pkt_len < 0)
         return PAM_CONV_ERR;
 
-      pkt_len = read_packet(param, &pkt);
-      if (pkt_len < 0)
-      {
-        PAM_DEBUG((stderr, "PAM: conv: recv() ERROR\n"));
-        return PAM_CONV_ERR;
-      }
       PAM_DEBUG((stderr, "PAM: conv: recv(%.*s)\n", pkt_len, pkt));
       /* allocate and copy the reply to the response array */
       if (!((*resp)[i].resp= strndup((char*) pkt, pkt_len)))
@@ -166,7 +163,8 @@ static int pam_auth_base(struct param *param, MYSQL_SERVER_AUTH_INFO *info)
   PAM_DEBUG((stderr, "PAM: pam_get_item(PAM_USER)\n"));
   DO( pam_get_item(pamh, PAM_USER, (pam_get_item_3_arg) &new_username) );
 
-  if (new_username && strcmp(new_username, info->user_name))
+  if (new_username &&
+      (winbind_hack ? strcasecmp : strcmp)(new_username, info->user_name))
     strncpy(info->authenticated_as, new_username,
             sizeof(info->authenticated_as));
   info->authenticated_as[sizeof(info->authenticated_as)-1]= 0;

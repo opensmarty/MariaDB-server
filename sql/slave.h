@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifndef SLAVE_H
 #define SLAVE_H
@@ -278,7 +278,6 @@ void slave_background_gtid_pos_create_request
         (rpl_slave_state::gtid_pos_table *table_entry);
 void slave_background_gtid_pending_delete_request(void);
 
-extern bool volatile abort_loop;
 extern Master_info *active_mi; /* active_mi for multi-master */
 extern Master_info *default_master_info; /* To replace active_mi */
 extern Master_info_index *master_info_index;

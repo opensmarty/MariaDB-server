@@ -3,7 +3,7 @@
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2018, MariaDB Corporation.
+Copyright (c) 2013, 2019, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -28,7 +28,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -487,8 +487,29 @@ create_log_files(
 		return(DB_ERROR);
 	}
 	ut_d(recv_no_log_write = false);
-	recv_reset_logs(lsn);
+	log_sys.lsn = ut_uint64_align_up(lsn, OS_FILE_LOG_BLOCK_SIZE);
+
+	log_sys.log.set_lsn(log_sys.lsn);
+	log_sys.log.set_lsn_offset(LOG_FILE_HDR_SIZE);
+
+	log_sys.buf_next_to_write = 0;
+	log_sys.write_lsn = log_sys.lsn;
+
+	log_sys.next_checkpoint_no = 0;
+	log_sys.last_checkpoint_lsn = 0;
+
+	memset(log_sys.buf, 0, srv_log_buffer_size);
+	log_block_init(log_sys.buf, log_sys.lsn);
+	log_block_set_first_rec_group(log_sys.buf, LOG_BLOCK_HDR_SIZE);
+
+	log_sys.buf_free = LOG_BLOCK_HDR_SIZE;
+	log_sys.lsn += LOG_BLOCK_HDR_SIZE;
+
+	MONITOR_SET(MONITOR_LSN_CHECKPOINT_AGE,
+		    (log_sys.lsn - log_sys.last_checkpoint_lsn));
 	log_mutex_exit();
+
+	log_make_checkpoint_at(LSN_MAX);
 
 	return(DB_SUCCESS);
 }
@@ -654,9 +675,19 @@ static bool srv_undo_tablespace_open(const char* name, ulint space_id,
 
 	fil_set_max_space_id_if_bigger(space_id);
 
-	fil_space_t* space = fil_space_create(
-		undo_name, space_id, FSP_FLAGS_PAGE_SSIZE(),
-		FIL_TYPE_TABLESPACE, NULL);
+	ulint fsp_flags;
+	switch (srv_checksum_algorithm) {
+	case SRV_CHECKSUM_ALGORITHM_FULL_CRC32:
+	case SRV_CHECKSUM_ALGORITHM_STRICT_FULL_CRC32:
+		fsp_flags = (FSP_FLAGS_FCRC32_MASK_MARKER
+			     | FSP_FLAGS_FCRC32_PAGE_SSIZE());
+		break;
+	default:
+		fsp_flags = FSP_FLAGS_PAGE_SSIZE();
+	}
+
+	fil_space_t* space = fil_space_create(undo_name, space_id, fsp_flags,
+					      FIL_TYPE_TABLESPACE, NULL);
 
 	ut_a(fil_validate());
 	ut_a(space);
@@ -1076,11 +1107,11 @@ srv_shutdown_all_bg_threads()
 			ut_ad(!srv_read_only_mode);
 
 			/* e. Exit the i/o threads */
-			if (recv_sys->flush_start != NULL) {
-				os_event_set(recv_sys->flush_start);
+			if (recv_sys.flush_start != NULL) {
+				os_event_set(recv_sys.flush_start);
 			}
-			if (recv_sys->flush_end != NULL) {
-				os_event_set(recv_sys->flush_end);
+			if (recv_sys.flush_end != NULL) {
+				os_event_set(recv_sys.flush_end);
 			}
 
 			os_event_set(buf_flush_event);
@@ -1296,10 +1327,6 @@ dberr_t srv_start(bool create_new_db)
 
 #ifdef UNIV_IBUF_DEBUG
 	ib::info() << "!!!!!!!! UNIV_IBUF_DEBUG switched on !!!!!!!!!";
-# ifdef UNIV_IBUF_COUNT_DEBUG
-	ib::info() << "!!!!!!!! UNIV_IBUF_COUNT_DEBUG switched on !!!!!!!!!";
-	ib::error() << "Crash recovery will fail with UNIV_IBUF_COUNT_DEBUG";
-# endif
 #endif
 
 #ifdef UNIV_LOG_LSN_DEBUG
@@ -1505,7 +1532,7 @@ dberr_t srv_start(bool create_new_db)
 #endif /* UNIV_DEBUG */
 
 	log_sys.create();
-	recv_sys_init();
+	recv_sys.create();
 	lock_sys.create(srv_lock_table_size);
 
 	/* Create i/o-handler threads: */
@@ -1533,7 +1560,7 @@ dberr_t srv_start(bool create_new_db)
 
 #ifdef UNIV_LINUX
 		/* Wait for the setpriority() call to finish. */
-		os_event_wait(recv_sys->flush_end);
+		os_event_wait(recv_sys.flush_end);
 #endif /* UNIV_LINUX */
 		srv_start_state_set(SRV_START_STATE_IO);
 	}
@@ -1547,7 +1574,7 @@ dberr_t srv_start(bool create_new_db)
 		if (err != DB_SUCCESS) {
 			return(srv_init_abort(DB_ERROR));
 		}
-		recv_sys_debug_free();
+		recv_sys.debug_free();
 	}
 
 	/* Open or create the data files. */
@@ -1623,6 +1650,10 @@ dberr_t srv_start(bool create_new_db)
 				}
 
 				/* opened all files */
+				break;
+			}
+
+			if (stat_info.type != OS_FILE_TYPE_FILE) {
 				break;
 			}
 
@@ -1823,12 +1854,20 @@ files_checked:
 			return(srv_init_abort(err));
 		}
 	} else {
+		/* Work around the bug that we were performing a dirty read of
+		at least the TRX_SYS page into the buffer pool above, without
+		reading or applying any redo logs.
+
+		MDEV-19229 FIXME: Remove the dirty reads and this call.
+		Add an assertion that the buffer pool is empty. */
+		buf_pool_invalidate();
+
 		/* We always try to do a recovery, even if the database had
 		been shut down normally: this is the normal startup path */
 
 		err = recv_recovery_from_checkpoint_start(flushed_lsn);
 
-		recv_sys->dblwr.pages.clear();
+		recv_sys.dblwr.pages.clear();
 
 		if (err != DB_SUCCESS) {
 			return(srv_init_abort(err));
@@ -1860,7 +1899,8 @@ files_checked:
 
 			recv_apply_hashed_log_recs(true);
 
-			if (recv_sys->found_corrupt_log) {
+			if (recv_sys.found_corrupt_log
+			    || recv_sys.found_corrupt_fs) {
 				return(srv_init_abort(DB_CORRUPTION));
 			}
 
@@ -1883,7 +1923,7 @@ files_checked:
 				/* New data file(s) were added */
 				mtr.start();
 				buf_block_t* block = buf_page_get(
-					page_id_t(0, 0), univ_page_size,
+					page_id_t(0, 0), 0,
 					RW_SX_LATCH, &mtr);
 				ulint size = mach_read_from_4(
 					FSP_HEADER_OFFSET + FSP_SIZE
@@ -1907,8 +1947,7 @@ files_checked:
 #ifdef UNIV_DEBUG
 		{
 			mtr.start();
-			buf_block_t* block = buf_page_get(page_id_t(0, 0),
-							  univ_page_size,
+			buf_block_t* block = buf_page_get(page_id_t(0, 0), 0,
 							  RW_S_LATCH, &mtr);
 			ut_ad(mach_read_from_4(FSP_SIZE + FSP_HEADER_OFFSET
 					       + block->frame)
@@ -2071,24 +2110,24 @@ files_checked:
 			block = buf_page_get(
 				page_id_t(IBUF_SPACE_ID,
 					  FSP_IBUF_HEADER_PAGE_NO),
-				univ_page_size, RW_X_LATCH, &mtr);
+				0, RW_X_LATCH, &mtr);
 			fil_block_check_type(*block, FIL_PAGE_TYPE_SYS, &mtr);
 			/* Already MySQL 3.23.53 initialized
 			FSP_IBUF_TREE_ROOT_PAGE_NO to
 			FIL_PAGE_INDEX. No need to reset that one. */
 			block = buf_page_get(
 				page_id_t(TRX_SYS_SPACE, TRX_SYS_PAGE_NO),
-				univ_page_size, RW_X_LATCH, &mtr);
+				0, RW_X_LATCH, &mtr);
 			fil_block_check_type(*block, FIL_PAGE_TYPE_TRX_SYS,
 					     &mtr);
 			block = buf_page_get(
 				page_id_t(TRX_SYS_SPACE,
 					  FSP_FIRST_RSEG_PAGE_NO),
-				univ_page_size, RW_X_LATCH, &mtr);
+				0, RW_X_LATCH, &mtr);
 			fil_block_check_type(*block, FIL_PAGE_TYPE_SYS, &mtr);
 			block = buf_page_get(
 				page_id_t(TRX_SYS_SPACE, FSP_DICT_HDR_PAGE_NO),
-				univ_page_size, RW_X_LATCH, &mtr);
+				0, RW_X_LATCH, &mtr);
 			fil_block_check_type(*block, FIL_PAGE_TYPE_SYS, &mtr);
 			mtr.commit();
 		}
@@ -2123,19 +2162,8 @@ files_checked:
 			every table in the InnoDB data dictionary that has
 			an .ibd file.
 
-			We also determine the maximum tablespace id used.
-
-			The 'validate' flag indicates that when a tablespace
-			is opened, we also read the header page and validate
-			the contents to the data dictionary. This is time
-			consuming, especially for databases with lots of ibd
-			files.  So only do it after a crash and not forcing
-			recovery.  Open rw transactions at this point is not
-			a good reason to validate. */
-			bool validate = recv_needed_recovery
-				&& srv_force_recovery == 0;
-
-			dict_check_tablespaces_and_store_max_id(validate);
+			We also determine the maximum tablespace id used. */
+			dict_check_tablespaces_and_store_max_id();
 		}
 
 		if (err != DB_SUCCESS) {
@@ -2186,6 +2214,7 @@ files_checked:
 		thread_started[2 + SRV_MAX_N_IO_THREADS] = true;
 		lock_sys.timeout_thread_active = true;
 
+		DBUG_EXECUTE_IF("innodb_skip_monitors", goto skip_monitors;);
 		/* Create the thread which warns of long semaphore waits */
 		srv_error_monitor_active = true;
 		thread_handles[3 + SRV_MAX_N_IO_THREADS] = os_thread_create(
@@ -2202,6 +2231,9 @@ files_checked:
 		srv_start_state |= SRV_START_STATE_LOCK_SYS
 			| SRV_START_STATE_MONITOR;
 
+#ifndef DBUG_OFF
+skip_monitors:
+#endif
 		ut_ad(srv_force_recovery >= SRV_FORCE_NO_UNDO_LOG_SCAN
 		      || !purge_sys.enabled());
 
@@ -2328,7 +2360,7 @@ files_checked:
 		  Create the dump/load thread only when not running with
 		  --wsrep-recover.
 		*/
-		if (!wsrep_recovery) {
+		if (!get_wsrep_recovery()) {
 #endif /* WITH_WSREP */
 
 		/* Create the buffer pool dump/load thread */
@@ -2368,36 +2400,6 @@ files_checked:
 	return(DB_SUCCESS);
 }
 
-#if 0
-/********************************************************************
-Sync all FTS cache before shutdown */
-static
-void
-srv_fts_close(void)
-/*===============*/
-{
-	dict_table_t*	table;
-
-	for (table = UT_LIST_GET_FIRST(dict_sys->table_LRU);
-	     table; table = UT_LIST_GET_NEXT(table_LRU, table)) {
-		fts_t*          fts = table->fts;
-
-		if (fts != NULL) {
-			fts_sync_table(table);
-		}
-	}
-
-	for (table = UT_LIST_GET_FIRST(dict_sys->table_non_LRU);
-	     table; table = UT_LIST_GET_NEXT(table_LRU, table)) {
-		fts_t*          fts = table->fts;
-
-		if (fts != NULL) {
-			fts_sync_table(table);
-		}
-	}
-}
-#endif
-
 /** Shut down background threads that can generate undo log. */
 void srv_shutdown_bg_undo_sources()
 {
@@ -2416,9 +2418,7 @@ void srv_shutdown_bg_undo_sources()
 /** Shut down InnoDB. */
 void innodb_shutdown()
 {
-	ut_ad(!my_atomic_loadptr_explicit(reinterpret_cast<void**>
-					  (&srv_running),
-					  MY_MEMORY_ORDER_RELAXED));
+	ut_ad(!srv_running.load(std::memory_order_relaxed));
 	ut_ad(!srv_undo_sources);
 
 	switch (srv_operation) {
@@ -2457,7 +2457,7 @@ void innodb_shutdown()
 	}
 
 	ut_ad(dict_stats_event || !srv_was_started || srv_read_only_mode);
-	ut_ad(dict_sys || !srv_was_started);
+	ut_ad(dict_sys.is_initialised() || !srv_was_started);
 	ut_ad(trx_sys.is_initialised() || !srv_was_started);
 	ut_ad(buf_dblwr || !srv_was_started || srv_read_only_mode
 	      || srv_force_recovery >= SRV_FORCE_NO_TRX_UNDO);
@@ -2486,7 +2486,7 @@ void innodb_shutdown()
 	and closing the data dictionary.  */
 
 #ifdef BTR_CUR_HASH_ADAPT
-	if (dict_sys) {
+	if (dict_sys.is_initialised()) {
 		btr_search_disable(true);
 	}
 #endif /* BTR_CUR_HASH_ADAPT */
@@ -2507,7 +2507,7 @@ void innodb_shutdown()
 		mutex_free(&srv_misc_tmpfile_mutex);
 	}
 
-	dict_close();
+	dict_sys.close();
 	btr_search_sys_free();
 
 	/* 3. Free all InnoDB's own mutexes and the os_fast_mutexes inside
@@ -2520,7 +2520,7 @@ void innodb_shutdown()
 	/* 4. Free all allocated memory */
 
 	pars_lexer_close();
-	recv_sys_close();
+	recv_sys.close();
 
 	ut_ad(buf_pool_ptr || !srv_was_started);
 	if (buf_pool_ptr) {

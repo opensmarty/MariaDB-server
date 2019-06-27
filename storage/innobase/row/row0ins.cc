@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -44,6 +44,9 @@ Created 4/20/1996 Heikki Tuuri
 #include "buf0lru.h"
 #include "fts0fts.h"
 #include "fts0types.h"
+#ifdef WITH_WSREP
+#include "wsrep_mysqld.h"
+#endif /* WITH_WSREP */
 
 /*************************************************************************
 IMPORTANT NOTE: Any operation that generates redo MUST check that there
@@ -328,7 +331,7 @@ row_ins_clust_index_entry_by_modify(
 {
 	const rec_t*	rec;
 	upd_t*		update;
-	dberr_t		err;
+	dberr_t		err = DB_SUCCESS;
 	btr_cur_t*	cursor	= btr_pcur_get_btr_cur(pcur);
 	TABLE*		mysql_table = NULL;
 	ut_ad(dict_index_is_clust(cursor->index));
@@ -351,7 +354,11 @@ row_ins_clust_index_entry_by_modify(
 
 	update = row_upd_build_difference_binary(
 		cursor->index, entry, rec, NULL, true,
-		thr_get_trx(thr), heap, mysql_table);
+		thr_get_trx(thr), heap, mysql_table, &err);
+	if (err != DB_SUCCESS) {
+		return(err);
+	}
+
 	if (mode != BTR_MODIFY_TREE) {
 		ut_ad((mode & ulint(~BTR_ALREADY_S_LATCHED))
 		      == BTR_MODIFY_LEAF);
@@ -484,8 +491,6 @@ row_ins_cascade_calc_update_vec(
 	doc_id_t	new_doc_id = FTS_NULL_DOC_ID;
 	ulint		prefix_col;
 
-	ut_a(node);
-	ut_a(foreign);
 	ut_a(cascade);
 	ut_a(table);
 	ut_a(index);
@@ -947,7 +952,7 @@ row_ins_foreign_fill_virtual(
 	upd_field_t*	upd_field;
 	dict_vcol_set*	v_cols = foreign->v_cols;
 	update->old_vrow = row_build(
-		ROW_COPY_POINTERS, index, rec,
+		ROW_COPY_DATA, index, rec,
 		offsets, index->table, NULL, NULL,
 		&ext, cascade->heap);
 	n_diff = update->n_fields;
@@ -962,11 +967,11 @@ row_ins_foreign_fill_virtual(
 
 	if (innobase_allocate_row_for_vcol(thd, index, &v_heap,
                                            &mysql_table,
-                                           &record, &vcol_storage))
-        {
+                                           &record, &vcol_storage)) {
+		if (v_heap) mem_heap_free(v_heap);
 		*err = DB_OUT_OF_MEMORY;
-                goto func_exit;
-        }
+		goto func_exit;
+	}
 
 	for (ulint i = 0; i < n_v_fld; i++) {
 
@@ -1043,7 +1048,7 @@ dberr_t wsrep_append_foreign_key(trx_t *trx,
 			       const rec_t*	clust_rec,
 			       dict_index_t*	clust_index,
 			       ibool		referenced,
-			       ibool            shared);
+			       Wsrep_service_key_type	key_type);
 #endif /* WITH_WSREP */
 
 /*********************************************************************//**
@@ -1082,10 +1087,6 @@ row_ins_foreign_check_on_constraint(
 	doc_id_t	doc_id = FTS_NULL_DOC_ID;
 
 	DBUG_ENTER("row_ins_foreign_check_on_constraint");
-	ut_a(thr);
-	ut_a(foreign);
-	ut_a(pcur);
-	ut_a(mtr);
 
 	trx = thr_get_trx(thr);
 
@@ -1405,9 +1406,9 @@ row_ins_foreign_check_on_constraint(
 	if (table->versioned() && cascade->is_delete != PLAIN_DELETE
 	    && cascade->update->affects_versioned()) {
 		ut_ad(!cascade->historical_heap);
-		cascade->historical_heap = mem_heap_create(128);
+		cascade->historical_heap = mem_heap_create(srv_page_size);
 		cascade->historical_row = row_build(
-			ROW_COPY_POINTERS, clust_index, clust_rec, NULL, table,
+			ROW_COPY_DATA, clust_index, clust_rec, NULL, table,
 			NULL, NULL, NULL, cascade->historical_heap);
 	}
 
@@ -1430,7 +1431,7 @@ row_ins_foreign_check_on_constraint(
 
 #ifdef WITH_WSREP
 	err = wsrep_append_foreign_key(trx, foreign, clust_rec, clust_index,
-				       FALSE, FALSE);
+				       FALSE, WSREP_SERVICE_KEY_EXCLUSIVE);
 	if (err != DB_SUCCESS) {
 		fprintf(stderr,
 			"WSREP: foreign key append failed: %d\n", err);
@@ -1542,7 +1543,7 @@ row_ins_set_exclusive_rec_lock(
 /***************************************************************//**
 Checks if foreign key constraint fails for an index entry. Sets shared locks
 which lock either the success or the failure of the constraint. NOTE that
-the caller must have a shared latch on dict_operation_lock.
+the caller must have a shared latch on dict_sys.latch.
 @return DB_SUCCESS, DB_NO_REFERENCED_ROW, or DB_ROW_IS_REFERENCED */
 dberr_t
 row_ins_check_foreign_constraint(
@@ -1583,7 +1584,7 @@ row_ins_check_foreign_constraint(
 	upd_node= NULL;
 #endif /* WITH_WSREP */
 
-	ut_ad(rw_lock_own(dict_operation_lock, RW_LOCK_S));
+	ut_ad(rw_lock_own(&dict_sys.latch, RW_LOCK_S));
 
 	err = DB_SUCCESS;
 
@@ -1811,7 +1812,10 @@ row_ins_check_foreign_constraint(
 						rec,
 						check_index,
 						check_ref,
-						(upd_node) ? TRUE : FALSE);
+						(upd_node != NULL
+						 && wsrep_protocol_version < 4)
+						? WSREP_SERVICE_KEY_SHARED
+						: WSREP_SERVICE_KEY_REFERENCE);
 #endif /* WITH_WSREP */
 					goto end_scan;
 				} else if (foreign->type != 0) {
@@ -1986,7 +1990,7 @@ row_ins_check_foreign_constraints(
 			}
 
 			/* NOTE that if the thread ends up waiting for a lock
-			we will release dict_operation_lock temporarily!
+			we will release dict_sys.latch temporarily!
 			But the counter on the table protects the referenced
 			table from being dropped while the check is running. */
 
@@ -2778,8 +2782,7 @@ do_insert:
 
 			DBUG_EXECUTE_IF(
 				"row_ins_extern_checkpoint",
-				log_make_checkpoint_at(
-					LSN_MAX, TRUE););
+				log_write_up_to(mtr.commit_lsn(), true););
 			err = row_ins_index_entry_big_rec(
 				entry, big_rec, offsets, &offsets_heap, index,
 				thr_get_trx(thr)->mysql_thd);
@@ -2988,7 +2991,7 @@ row_ins_sec_index_entry_low(
 				"Table %s is encrypted but encryption service or"
 				" used key_id is not available. "
 				" Can't continue reading table.",
-				index->table->name);
+				index->table->name.m_name);
 			index->table->file_unreadable = true;
 		}
 		goto func_exit;
@@ -3036,9 +3039,9 @@ row_ins_sec_index_entry_low(
 			if (!index->is_committed()) {
 				ut_ad(!thr_get_trx(thr)
 				      ->dict_operation_lock_mode);
-				mutex_enter(&dict_sys->mutex);
+				mutex_enter(&dict_sys.mutex);
 				dict_set_corrupted_index_cache_only(index);
-				mutex_exit(&dict_sys->mutex);
+				mutex_exit(&dict_sys.mutex);
 				/* Do not return any error to the
 				caller. The duplicate will be reported
 				by ALTER TABLE or CREATE UNIQUE INDEX.
@@ -3228,9 +3231,27 @@ row_ins_clust_index_entry(
 
 	n_uniq = dict_index_is_unique(index) ? index->n_uniq : 0;
 
+#ifdef WITH_WSREP
+	const bool skip_locking
+		= wsrep_thd_skip_locking(thr_get_trx(thr)->mysql_thd);
+	ulint	flags = index->table->no_rollback() ? BTR_NO_ROLLBACK
+		: (index->table->is_temporary() || skip_locking)
+		? BTR_NO_LOCKING_FLAG : 0;
+#ifdef UNIV_DEBUG
+	if (skip_locking && strcmp(wsrep_get_sr_table_name(),
+                                   index->table->name.m_name)) {
+		WSREP_ERROR("Record locking is disabled in this thread, "
+			    "but the table being modified is not "
+			    "`%s`: `%s`.", wsrep_get_sr_table_name(),
+			    index->table->name.m_name);
+		ut_error;
+	}
+#endif /* UNIV_DEBUG */
+#else
 	ulint	flags = index->table->no_rollback() ? BTR_NO_ROLLBACK
 		: index->table->is_temporary()
 		? BTR_NO_LOCKING_FLAG : 0;
+#endif /* WITH_WSREP */
 	const ulint	orig_n_fields = entry->n_fields;
 
 	/* Try first optimistic descent to the B-tree */
@@ -3391,14 +3412,14 @@ row_ins_spatial_index_entry_set_mbr_field(
 	dfield_t*	field,		/*!< in/out: mbr field */
 	const dfield_t*	row_field)	/*!< in: row field */
 {
-	uchar*		dptr = NULL;
 	ulint		dlen = 0;
 	double		mbr[SPDIMS * 2];
 
 	/* This must be a GEOMETRY datatype */
 	ut_ad(DATA_GEOMETRY_MTYPE(field->type.mtype));
 
-	dptr = static_cast<uchar*>(dfield_get_data(row_field));
+	const byte* dptr = static_cast<const byte*>(
+		dfield_get_data(row_field));
 	dlen = dfield_get_len(row_field);
 
 	/* obtain the MBR */
@@ -3462,8 +3483,9 @@ row_ins_index_entry_set_vals(
 				field->type.prtype = DATA_BINARY_TYPE;
 			} else {
 				ut_ad(col->len <= sizeof field_ref_zero);
+				ut_ad(ind_field->fixed_len <= col->len);
 				dfield_set_data(field, field_ref_zero,
-						col->len);
+						ind_field->fixed_len);
 				field->type.prtype = DATA_NOT_NULL;
 			}
 

@@ -16,7 +16,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /* This file is originally from the mysql distribution. Coded by monty */
 
@@ -27,6 +27,7 @@
 #include "m_ctype.h"                            /* my_charset_bin */
 #include <my_sys.h>              /* alloc_root, my_free, my_realloc */
 #include "m_string.h"                           /* TRASH */
+#include "sql_list.h"
 
 class String;
 typedef struct st_io_cache IO_CACHE;
@@ -125,6 +126,7 @@ size_t my_copy_with_hex_escaping(CHARSET_INFO *cs,
 uint convert_to_printable(char *to, size_t to_len,
                           const char *from, size_t from_len,
                           CHARSET_INFO *from_cs, size_t nbytes= 0);
+size_t convert_to_printable_required_length(uint len);
 
 
 class Charset
@@ -158,6 +160,14 @@ public:
   {
     swap_variables(CHARSET_INFO*, m_charset, other.m_charset);
   }
+  /*
+    Collation name without the character set name.
+    For example, in case of "latin1_swedish_ci",
+    this method returns "_swedish_ci".
+  */
+  LEX_CSTRING collation_specific_name() const;
+  bool encoding_allows_reinterpret_as(CHARSET_INFO *cs) const;
+  bool eq_collation_specific_names(CHARSET_INFO *cs) const;
 };
 
 
@@ -165,7 +175,7 @@ public:
   A storage for String.
   Should be eventually derived from LEX_STRING.
 */
-class Static_binary_string
+class Static_binary_string : public Sql_alloc
 {
 protected:
   char *Ptr;
@@ -181,24 +191,6 @@ public:
   {
     DBUG_ASSERT(length_arg < UINT_MAX32);
   }
-
-  static void *operator new(size_t size, MEM_ROOT *mem_root) throw ()
-  { return (void*) alloc_root(mem_root, size); }
-  static void *operator new[](size_t size, MEM_ROOT *mem_root) throw ()
-  { return alloc_root(mem_root, size); }
-  static void operator delete(void *ptr_arg, size_t size)
-  {
-    (void) ptr_arg;
-    (void) size;
-    TRASH_FREE(ptr_arg, size);
-  }
-  static void operator delete(void *, MEM_ROOT *)
-  { /* never called */ }
-  static void operator delete[](void *ptr, size_t size)
-  { TRASH_FREE(ptr, size); }
-  static void operator delete[](void *, MEM_ROOT *)
-  { /* never called */ }
-
   inline uint32 length() const { return str_length;}
   inline char& operator [] (size_t i) const { return Ptr[i]; }
   inline void length(size_t len) { str_length=(uint32)len ; }
@@ -683,6 +675,7 @@ public:
 
   int reserve(size_t space_needed)
   {
+    DBUG_ASSERT((ulonglong) str_length + space_needed < UINT_MAX32);
     return realloc(str_length + space_needed);
   }
   int reserve(size_t space_needed, size_t grow_by);
@@ -968,6 +961,8 @@ public:
   {
     return !sortcmp(this, other, cs);
   }
+private:
+  bool append_semi_hex(const char *s, uint len, CHARSET_INFO *cs);
 };
 
 
@@ -993,11 +988,6 @@ public:
   explicit StringBuffer(CHARSET_INFO *cs) : String(buff, buff_sz, cs)
   {
     length(0);
-  }
-  StringBuffer(const char *str, size_t length_arg, CHARSET_INFO *cs)
-    : String(buff, buff_sz, cs)
-  {
-    set(str, length_arg, cs);
   }
 };
 

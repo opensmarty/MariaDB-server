@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef SQL_TABLE_INCLUDED
 #define SQL_TABLE_INCLUDED
@@ -198,8 +198,8 @@ int mysql_create_table_no_lock(THD *thd, const LEX_CSTRING *db,
                                int create_table_mode, TABLE_LIST *table);
 
 handler *mysql_create_frm_image(THD *thd,
-                                const LEX_CSTRING *db,
-                                const LEX_CSTRING *table_name,
+                                const LEX_CSTRING &db,
+                                const LEX_CSTRING &table_name,
                                 HA_CREATE_INFO *create_info,
                                 Alter_info *alter_info,
                                 int create_table_mode,

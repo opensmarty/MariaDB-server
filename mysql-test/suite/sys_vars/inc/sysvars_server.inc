@@ -13,7 +13,7 @@ set sql_mode=ansi_quotes;
 set global div_precision_increment=5;
 
 --replace_regex /^\/\S+/PATH/
---replace_result $MASTER_MYPORT MASTER_MYPORT
+--replace_result $MASTER_MYPORT MASTER_MYPORT 392192 299008
 select * from information_schema.system_variables
   where variable_name not like 'aria%' and
         variable_name not like 'debug%' and
@@ -31,6 +31,7 @@ select * from information_schema.system_variables
           'rand_seed1',
           'rand_seed2',
           'system_time_zone',
+          'tls_version',
           'version_comment',
           'version_source_revision',
           'version_compile_machine', 'version_compile_os',
@@ -55,6 +56,7 @@ select VARIABLE_NAME, VARIABLE_SCOPE, VARIABLE_TYPE, VARIABLE_COMMENT,
           'rand_seed1',
           'rand_seed2',
           'system_time_zone',
+          'tls_version',
           'version_comment',
           'version_source_revision',
           'version_compile_machine', 'version_compile_os',

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -232,8 +232,7 @@ trx_undo_log_v_idx(
 {
 	ut_ad(pos < table->n_v_def);
 	dict_v_col_t*	vcol = dict_table_get_nth_v_col(table, pos);
-
-	ulint		n_idx = vcol->v_indexes->size();
+	ulint		n_idx = vcol->n_v_indexes;
 	byte*		old_ptr;
 
 	ut_ad(n_idx > 0);
@@ -260,12 +259,7 @@ trx_undo_log_v_idx(
 
 	ptr += mach_write_compressed(ptr, n_idx);
 
-	dict_v_idx_list::iterator       it;
-
-	for (it = vcol->v_indexes->begin();
-	     it != vcol->v_indexes->end(); ++it) {
-		dict_v_idx_t	v_index = *it;
-
+	for (const auto& v_index : vcol->v_indexes) {
 		ptr += mach_write_compressed(
 			ptr, static_cast<ulint>(v_index.index->id));
 
@@ -400,8 +394,6 @@ trx_undo_report_insert_virtual(
 
 	for (ulint col_no = 0; col_no < dict_table_get_n_v_cols(table);
 	     col_no++) {
-		dfield_t*       vfield = NULL;
-
 		const dict_v_col_t*     col
 			= dict_table_get_nth_v_col(table, col_no);
 
@@ -424,7 +416,8 @@ trx_undo_report_insert_virtual(
 				return(false);
 			}
 
-			vfield = dtuple_get_nth_v_field(row, col->v_pos);
+			const dfield_t* vfield = dtuple_get_nth_v_field(
+				row, col->v_pos);
 			ulint	flen = vfield->len;
 
 			if (flen != UNIV_SQL_NULL) {
@@ -718,7 +711,7 @@ trx_undo_rec_skip_row_ref(
 log of an update or delete marking of a clustered index record.
 @param[out]	ext_buf		buffer to hold the prefix data and BLOB pointer
 @param[in]	prefix_len	prefix size to store in the undo log
-@param[in]	page_size	page size
+@param[in]	zip_size	ROW_FORMAT=COMPRESSED page size, or 0
 @param[in]	field		an externally stored column
 @param[in,out]	len		input: length of field; output: used length of
 ext_buf
@@ -728,13 +721,13 @@ byte*
 trx_undo_page_fetch_ext(
 	byte*			ext_buf,
 	ulint			prefix_len,
-	const page_size_t&	page_size,
+	ulint			zip_size,
 	const byte*		field,
 	ulint*			len)
 {
 	/* Fetch the BLOB. */
 	ulint	ext_len = btr_copy_externally_stored_field_prefix(
-		ext_buf, prefix_len, page_size, field, *len);
+		ext_buf, prefix_len, zip_size, field, *len);
 	/* BLOBs should always be nonempty. */
 	ut_a(ext_len);
 	/* Append the BLOB pointer to the prefix. */
@@ -752,7 +745,7 @@ available
 				size, or NULL when should not fetch a longer
 				prefix
 @param[in]	prefix_len	prefix size to store in the undo log
-@param[in]	page_size	page size
+@param[in]	zip_size	ROW_FORMAT=COMPRESSED page size, or 0
 @param[in,out]	field		the locally stored part of the externally
 stored column
 @param[in,out]	len		length of field, in bytes
@@ -765,7 +758,7 @@ trx_undo_page_report_modify_ext(
 	byte*			ptr,
 	byte*			ext_buf,
 	ulint			prefix_len,
-	const page_size_t&	page_size,
+	ulint			zip_size,
 	const byte**		field,
 	ulint*			len,
 	spatial_status_t	spatial_status)
@@ -807,7 +800,7 @@ trx_undo_page_report_modify_ext(
 		ptr += mach_write_compressed(ptr, *len);
 
 		*field = trx_undo_page_fetch_ext(ext_buf, prefix_len,
-						 page_size, *field, len);
+						 zip_size, *field, len);
 
 		ptr += mach_write_compressed(ptr, *len + spatial_len);
 	} else {
@@ -820,7 +813,7 @@ trx_undo_page_report_modify_ext(
 
 /** Get MBR from a Geometry column stored externally
 @param[out]	mbr		MBR to fill
-@param[in]	pagesize	table pagesize
+@param[in]	zip_size	ROW_FORMAT=COMPRESSED page size, or 0
 @param[in]	field		field contain the geometry data
 @param[in,out]	len		length of field, in bytes
 */
@@ -828,17 +821,17 @@ static
 void
 trx_undo_get_mbr_from_ext(
 /*======================*/
-	double*			mbr,
-	const page_size_t&      page_size,
-	const byte*             field,
-	ulint*			len)
+	double*		mbr,
+	ulint		zip_size,
+	const byte*	field,
+	ulint*		len)
 {
 	uchar*		dptr = NULL;
 	ulint		dlen;
 	mem_heap_t*	heap = mem_heap_create(100);
 
 	dptr = btr_copy_externally_stored_field(
-		&dlen, field, page_size, *len, heap);
+		&dlen, field, zip_size, *len, heap);
 
 	if (dlen <= GEO_DATA_HEADER_SIZE) {
 		for (uint i = 0; i < SPDIMS; ++i) {
@@ -1028,7 +1021,7 @@ trx_undo_page_report_modify(
 				on them */
 				if (upd_fld_is_virtual_col(fld)
 				    && dict_table_get_nth_v_col(
-					table, pos)->v_indexes->empty()) {
+					    table, pos)->v_indexes.empty()) {
 					n_updated--;
 				}
 			}
@@ -1069,7 +1062,7 @@ trx_undo_page_report_modify(
 				an online alter table */
 				if (dict_index_is_online_ddl(index)
 				    && dict_table_get_nth_v_col(
-					table, pos)->v_indexes->empty()) {
+					table, pos)->v_indexes.empty()) {
 					continue;
 				}
 
@@ -1181,7 +1174,7 @@ write_field:
 					&& !ignore_prefix
 					&& flen < REC_ANTELOPE_MAX_INDEX_COL_LEN
 					? ext_buf : NULL, prefix_len,
-					dict_table_page_size(table),
+					table->space->zip_size(),
 					&field, &flen, SPATIAL_UNKNOWN);
 
 				*type_cmpl_ptr |= TRX_UNDO_UPD_EXTERN;
@@ -1335,8 +1328,8 @@ store_len:
 							table, col);
 
 					ut_a(prefix_len < sizeof ext_buf);
-					const page_size_t& page_size
-						= dict_table_page_size(table);
+					const ulint zip_size
+						= table->space->zip_size();
 
 					/* If there is a spatial index on it,
 					log its MBR */
@@ -1345,7 +1338,7 @@ store_len:
 								col->mtype));
 
 						trx_undo_get_mbr_from_ext(
-							mbr, page_size,
+							mbr, zip_size,
 							field, &flen);
 					}
 
@@ -1354,7 +1347,7 @@ store_len:
 						flen < REC_ANTELOPE_MAX_INDEX_COL_LEN
 						&& !ignore_prefix
 						? ext_buf : NULL, prefix_len,
-						page_size,
+						zip_size,
 						&field, &flen,
 						spatial_status);
 				} else {
@@ -1394,8 +1387,6 @@ already_logged:
 
 		for (col_no = 0; col_no < dict_table_get_n_v_cols(table);
 		     col_no++) {
-			dfield_t*	vfield = NULL;
-
 			const dict_v_col_t*     col
 				= dict_table_get_nth_v_col(table, col_no);
 
@@ -1423,6 +1414,8 @@ already_logged:
 				if (!ptr) {
 					 return(0);
 				}
+
+				const dfield_t* vfield = NULL;
 
 				if (update) {
 					ut_ad(!row);
@@ -1779,11 +1772,7 @@ trx_undo_rec_get_partial_row(
 	bool		first_v_col = true;
 	bool		is_undo_log = true;
 
-	ut_ad(index);
-	ut_ad(ptr);
-	ut_ad(row);
-	ut_ad(heap);
-	ut_ad(dict_index_is_clust(index));
+	ut_ad(index->is_primary());
 
 	*row = dtuple_create_with_vcol(
 		heap, dict_table_get_n_cols(index->table),
@@ -2342,7 +2331,7 @@ trx_undo_prev_version_build(
 				dtuple if it is not yet created. This heap
 				diffs from "heap" above in that it could be
 				prebuilt->old_vers_heap for selection */
-	const dtuple_t**vrow,	/*!< out: virtual column info, if any */
+	dtuple_t**	vrow,	/*!< out: virtual column info, if any */
 	ulint		v_status)
 				/*!< in: status determine if it is going
 				into this function by purge thread or not.
@@ -2543,7 +2532,7 @@ void
 trx_undo_read_v_cols(
 	const dict_table_t*	table,
 	const byte*		ptr,
-	const dtuple_t*		row,
+	dtuple_t*		row,
 	bool			in_purge)
 {
 	const byte*     end_ptr;

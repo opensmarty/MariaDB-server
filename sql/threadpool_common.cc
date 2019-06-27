@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "mariadb.h"
 #include <violite.h>
@@ -243,7 +243,7 @@ static THD* threadpool_add_connection(CONNECT *connect, void *scheduler_data)
     return NULL;
   }
   delete connect;
-  add_to_active_threads(thd);
+  server_threads.insert(thd);
   thd->set_mysys_var(mysys_var);
   thd->event_scheduler.data= scheduler_data;
 

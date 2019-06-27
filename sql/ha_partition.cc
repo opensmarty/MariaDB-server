@@ -1,6 +1,6 @@
 /*
-  Copyright (c) 2005, 2017, Oracle and/or its affiliates.
-  Copyright (c) 2009, 2018, MariaDB
+  Copyright (c) 2005, 2019, Oracle and/or its affiliates.
+  Copyright (c) 2009, 2019, MariaDB
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -13,7 +13,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA
+  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA
 */
 
 /*
@@ -1367,7 +1367,7 @@ bool print_admin_msg(THD* thd, uint len,
   protocol->store(msgbuf, msg_length, system_charset_info);
   if (protocol->write())
   {
-    sql_print_error("Failed on my_net_write, writing to stderr instead: %s\n",
+    sql_print_error("Failed on my_net_write, writing to stderr instead: %s",
                     msgbuf);
     goto err;
   }
@@ -2194,7 +2194,7 @@ void ha_partition::update_create_info(HA_CREATE_INFO *create_info)
   uint num_parts= (num_subparts ? m_file_tot_parts / num_subparts :
                    m_file_tot_parts);
   HA_CREATE_INFO dummy_info;
-  memset(&dummy_info, 0, sizeof(dummy_info));
+  dummy_info.init();
 
   /*
     Since update_create_info() can be called from mysql_prepare_alter_table()
@@ -2828,6 +2828,8 @@ bool ha_partition::create_handler_file(const char *name)
       }
     }
     (void) mysql_file_close(file, MYF(0));
+    if (result)
+      mysql_file_delete(key_file_partition, file_name, MYF(MY_WME));
   }
   else
     result= TRUE;
@@ -5759,12 +5761,6 @@ int ha_partition::index_read_idx_map(uchar *buf, uint index,
 
     get_partition_set(table, buf, index, &m_start_key, &m_part_spec);
 
-    /*
-      We have either found exactly 1 partition
-      (in which case start_part == end_part)
-      or no matching partitions (start_part > end_part)
-    */
-    DBUG_ASSERT(m_part_spec.start_part >= m_part_spec.end_part);
     /* The start part is must be marked as used. */
     DBUG_ASSERT(m_part_spec.start_part > m_part_spec.end_part ||
                 bitmap_is_set(&(m_part_info->read_partitions),
@@ -6266,11 +6262,14 @@ ha_rows ha_partition::multi_range_read_info_const(uint keyno,
   uint ret_mrr_mode= 0;
   range_seq_t seq_it;
   part_id_range save_part_spec;
+  Cost_estimate part_cost;
   DBUG_ENTER("ha_partition::multi_range_read_info_const");
   DBUG_PRINT("enter", ("partition this: %p", this));
 
   m_mrr_new_full_buffer_size= 0;
   save_part_spec= m_part_spec;
+
+  cost->reset();
 
   seq_it= seq->init(seq_init_param, n_ranges, *mrr_mode);
   if (unlikely((error= multi_range_key_create_key(seq, seq_it))))
@@ -6278,7 +6277,7 @@ ha_rows ha_partition::multi_range_read_info_const(uint keyno,
     if (likely(error == HA_ERR_END_OF_FILE))    // No keys in range
     {
       rows= 0;
-      goto calc_cost;
+      goto end;
     }
     /*
       This error means that we can't do multi_range_read for the moment
@@ -6307,18 +6306,20 @@ ha_rows ha_partition::multi_range_read_info_const(uint keyno,
       ha_rows tmp_rows;
       uint tmp_mrr_mode;
       m_mrr_buffer_size[i]= 0;
+      part_cost.reset();
       tmp_mrr_mode= *mrr_mode;
       tmp_rows= (*file)->
         multi_range_read_info_const(keyno, &m_part_seq_if,
                                     &m_partition_part_key_multi_range_hld[i],
                                     m_part_mrr_range_length[i],
                                     &m_mrr_buffer_size[i],
-                                    &tmp_mrr_mode, cost);
+                                    &tmp_mrr_mode, &part_cost);
       if (tmp_rows == HA_POS_ERROR)
       {
         m_part_spec= save_part_spec;
         DBUG_RETURN(HA_POS_ERROR);
       }
+      cost->add(&part_cost);
       rows+= tmp_rows;
       ret_mrr_mode|= tmp_mrr_mode;
       m_mrr_new_full_buffer_size+= m_mrr_buffer_size[i];
@@ -6326,15 +6327,8 @@ ha_rows ha_partition::multi_range_read_info_const(uint keyno,
   } while (*(++file));
   *mrr_mode= ret_mrr_mode;
 
-calc_cost:
+end:
   m_part_spec= save_part_spec;
-  cost->reset();
-  cost->avg_io_cost= 1;
-  if ((*mrr_mode & HA_MRR_INDEX_ONLY) && rows > 2)
-    cost->io_count= keyread_time(keyno, n_ranges, (uint) rows);
-  else
-    cost->io_count= read_time(keyno, n_ranges, rows);
-  cost->cpu_cost= (double) rows / TIME_FOR_COMPARE + 0.01;
   DBUG_RETURN(rows);
 }
 
@@ -6347,9 +6341,12 @@ ha_rows ha_partition::multi_range_read_info(uint keyno, uint n_ranges,
 {
   uint i;
   handler **file;
-  ha_rows rows;
+  ha_rows rows= 0;
+  Cost_estimate part_cost;
   DBUG_ENTER("ha_partition::multi_range_read_info");
   DBUG_PRINT("enter", ("partition this: %p", this));
+
+  cost->reset();
 
   m_mrr_new_full_buffer_size= 0;
   file= m_file;
@@ -6358,22 +6355,20 @@ ha_rows ha_partition::multi_range_read_info(uint keyno, uint n_ranges,
     i= (uint)(file - m_file);
     if (bitmap_is_set(&(m_part_info->read_partitions), (i)))
     {
+      ha_rows tmp_rows;
       m_mrr_buffer_size[i]= 0;
-      if ((rows= (*file)->multi_range_read_info(keyno, n_ranges, keys,
-                                                key_parts,
-                                                &m_mrr_buffer_size[i],
-                                                mrr_mode, cost)))
+      part_cost.reset();
+      if ((tmp_rows= (*file)->multi_range_read_info(keyno, n_ranges, keys,
+                                                    key_parts,
+                                                    &m_mrr_buffer_size[i],
+                                                    mrr_mode, &part_cost)))
         DBUG_RETURN(rows);
+      cost->add(&part_cost);
+      rows+= tmp_rows;
       m_mrr_new_full_buffer_size+= m_mrr_buffer_size[i];
     }
   } while (*(++file));
 
-  cost->reset();
-  cost->avg_io_cost= 1;
-  if (*mrr_mode & HA_MRR_INDEX_ONLY)
-    cost->io_count= keyread_time(keyno, n_ranges, (uint) rows);
-  else
-    cost->io_count= read_time(keyno, n_ranges, rows);
   DBUG_RETURN(0);
 }
 
@@ -8202,8 +8197,10 @@ int ha_partition::info(uint flag)
     stats.deleted= 0;
     stats.data_file_length= 0;
     stats.index_file_length= 0;
-    stats.check_time= 0;
     stats.delete_length= 0;
+    stats.check_time= 0;
+    stats.checksum= 0;
+    stats.checksum_null= TRUE;
     for (i= bitmap_get_first_set(&m_part_info->read_partitions);
          i < m_tot_parts;
          i= bitmap_get_next_set(&m_part_info->read_partitions, i))
@@ -8217,6 +8214,11 @@ int ha_partition::info(uint flag)
       stats.delete_length+= file->stats.delete_length;
       if (file->stats.check_time > stats.check_time)
         stats.check_time= file->stats.check_time;
+      if (!file->stats.checksum_null)
+      {
+        stats.checksum+= file->stats.checksum;
+        stats.checksum_null= FALSE;
+      }
     }
     if (stats.records && stats.records < 2 &&
         !(m_file[0]->ha_table_flags() & HA_STATS_RECORDS_IS_EXACT))
@@ -8372,10 +8374,8 @@ void ha_partition::get_dynamic_partition_info(PARTITION_STATS *stat_info,
   stat_info->create_time=          file->stats.create_time;
   stat_info->update_time=          file->stats.update_time;
   stat_info->check_time=           file->stats.check_time;
-  stat_info->check_sum= 0;
-  if (file->ha_table_flags() & (HA_HAS_OLD_CHECKSUM | HA_HAS_NEW_CHECKSUM))
-    stat_info->check_sum= file->checksum();
-  return;
+  stat_info->check_sum=            file->stats.checksum;
+  stat_info->check_sum_null=       file->stats.checksum_null;
 }
 
 
@@ -9342,6 +9342,43 @@ double ha_partition::scan_time()
 
 
 /**
+  @brief
+  Caculate time to scan the given index (index only scan)
+
+  @param inx      Index number to scan
+
+  @return time for scanning index inx
+*/
+
+double ha_partition::key_scan_time(uint inx)
+{
+  double scan_time= 0;
+  uint i;
+  DBUG_ENTER("ha_partition::key_scan_time");
+  for (i= bitmap_get_first_set(&m_part_info->read_partitions);
+       i < m_tot_parts;
+       i= bitmap_get_next_set(&m_part_info->read_partitions, i))
+    scan_time+= m_file[i]->key_scan_time(inx);
+  DBUG_RETURN(scan_time);
+}
+
+
+double ha_partition::keyread_time(uint inx, uint ranges, ha_rows rows)
+{
+  double read_time= 0;
+  uint i;
+  DBUG_ENTER("ha_partition::keyread_time");
+  if (!ranges)
+    DBUG_RETURN(handler::keyread_time(inx, ranges, rows));
+  for (i= bitmap_get_first_set(&m_part_info->read_partitions);
+       i < m_tot_parts;
+       i= bitmap_get_next_set(&m_part_info->read_partitions, i))
+    read_time+= m_file[i]->keyread_time(inx, ranges, rows);
+  DBUG_RETURN(read_time);
+}
+
+
+/**
   Find number of records in a range.
   @param inx      Index number
   @param min_key  Start of range
@@ -9778,7 +9815,7 @@ void ha_partition::print_error(int error, myf errflag)
       append_row_to_str(str);
 
       /* Log this error, so the DBA can notice it and fix it! */
-      sql_print_error("Table '%-192s' corrupted: row in wrong partition: %s\n"
+      sql_print_error("Table '%-192s' corrupted: row in wrong partition: %s"
                       "Please REPAIR the table!",
                       table->s->table_name.str,
                       str.c_ptr_safe());
@@ -10080,7 +10117,12 @@ bool ha_partition::inplace_alter_table(TABLE *altered_table,
 
   for (index= 0; index < m_tot_parts && !error; index++)
   {
-    ha_alter_info->handler_ctx= part_inplace_ctx->handler_ctx_array[index];
+    if ((ha_alter_info->handler_ctx=
+	 part_inplace_ctx->handler_ctx_array[index]) != NULL
+	&& index != 0)
+      ha_alter_info->handler_ctx->set_shared_data
+	(*part_inplace_ctx->handler_ctx_array[index - 1]);
+
     if (m_file[index]->ha_inplace_alter_table(altered_table,
                                               ha_alter_info))
       error= true;
@@ -10511,31 +10553,37 @@ void ha_partition::release_auto_increment()
       m_file[i]->ha_release_auto_increment();
     }
   }
-  else if (next_insert_id)
+  else
   {
-    ulonglong next_auto_inc_val;
     lock_auto_increment();
-    next_auto_inc_val= part_share->next_auto_inc_val;
-    /*
-      If the current auto_increment values is lower than the reserved
-      value, and the reserved value was reserved by this thread,
-      we can lower the reserved value.
-    */
-    if (next_insert_id < next_auto_inc_val &&
-        auto_inc_interval_for_cur_row.maximum() >= next_auto_inc_val)
+    if (next_insert_id)
     {
-      THD *thd= ha_thd();
+      ulonglong next_auto_inc_val= part_share->next_auto_inc_val;
       /*
-        Check that we do not lower the value because of a failed insert
-        with SET INSERT_ID, i.e. forced/non generated values.
+        If the current auto_increment values is lower than the reserved
+        value, and the reserved value was reserved by this thread,
+        we can lower the reserved value.
       */
-      if (thd->auto_inc_intervals_forced.maximum() < next_insert_id)
-        part_share->next_auto_inc_val= next_insert_id;
+      if (next_insert_id < next_auto_inc_val &&
+          auto_inc_interval_for_cur_row.maximum() >= next_auto_inc_val)
+      {
+        THD *thd= ha_thd();
+        /*
+          Check that we do not lower the value because of a failed insert
+          with SET INSERT_ID, i.e. forced/non generated values.
+        */
+        if (thd->auto_inc_intervals_forced.maximum() < next_insert_id)
+          part_share->next_auto_inc_val= next_insert_id;
+      }
+      DBUG_PRINT("info", ("part_share->next_auto_inc_val: %lu",
+                          (ulong) part_share->next_auto_inc_val));
     }
-    DBUG_PRINT("info", ("part_share->next_auto_inc_val: %lu",
-                        (ulong) part_share->next_auto_inc_val));
-
-    /* Unlock the multi row statement lock taken in get_auto_increment */
+    /*
+      Unlock the multi-row statement lock taken in get_auto_increment.
+      These actions must be performed even if the next_insert_id field
+      contains zero, otherwise if the update_auto_increment fails then
+      an unnecessary lock will remain:
+    */
     if (auto_increment_safe_stmt_log_lock)
     {
       auto_increment_safe_stmt_log_lock= FALSE;
@@ -10558,23 +10606,60 @@ void ha_partition::init_table_handle_for_HANDLER()
 
 
 /**
-  Return the checksum of the table (all partitions)
+  Calculate the checksum of the table (all partitions)
 */
 
-uint ha_partition::checksum() const
+int ha_partition::pre_calculate_checksum()
 {
-  ha_checksum sum= 0;
-
-  DBUG_ENTER("ha_partition::checksum");
+  int error;
+  DBUG_ENTER("ha_partition::pre_calculate_checksum");
+  m_pre_calling= TRUE;
   if ((table_flags() & (HA_HAS_OLD_CHECKSUM | HA_HAS_NEW_CHECKSUM)))
   {
     handler **file= m_file;
     do
     {
-      sum+= (*file)->checksum();
+      if ((error= (*file)->pre_calculate_checksum()))
+      {
+        DBUG_RETURN(error);
+      }
     } while (*(++file));
   }
-  DBUG_RETURN(sum);
+  DBUG_RETURN(0);
+}
+
+
+int ha_partition::calculate_checksum()
+{
+  int error;
+  stats.checksum= 0;
+  stats.checksum_null= TRUE;
+
+  DBUG_ENTER("ha_partition::calculate_checksum");
+  if (!m_pre_calling)
+  {
+    if ((error= pre_calculate_checksum()))
+    {
+      m_pre_calling= FALSE;
+      DBUG_RETURN(error);
+    }
+  }
+  m_pre_calling= FALSE;
+
+  handler **file= m_file;
+  do
+  {
+    if ((error= (*file)->calculate_checksum()))
+    {
+      DBUG_RETURN(error);
+    }
+    if (!(*file)->stats.checksum_null)
+    {
+      stats.checksum+= (*file)->stats.checksum;
+      stats.checksum_null= FALSE;
+    }
+  } while (*(++file));
+  DBUG_RETURN(0);
 }
 
 

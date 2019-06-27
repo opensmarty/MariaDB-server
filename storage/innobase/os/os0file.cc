@@ -2,7 +2,7 @@
 
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2018, MariaDB Corporation.
+Copyright (c) 2013, 2019, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted
 by Percona Inc.. Those modifications are
@@ -22,7 +22,7 @@ Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 ***********************************************************************/
 
@@ -38,14 +38,14 @@ Created 10/21/1995 Heikki Tuuri
 #include "sql_const.h"
 
 #ifdef UNIV_LINUX
-#include <sys/types.h>
-#include <sys/stat.h>
+# include <sys/types.h>
+# include <sys/stat.h>
 #endif
 
 #include "srv0srv.h"
 #include "srv0start.h"
 #include "fil0fil.h"
-#include "srv0srv.h"
+#include "fsp0fsp.h"
 #ifdef HAVE_LINUX_UNISTD_H
 #include "unistd.h"
 #endif
@@ -70,17 +70,13 @@ Created 10/21/1995 Heikki Tuuri
 # endif
 #endif
 
-#if defined(UNIV_LINUX) && defined(HAVE_SYS_STATVFS_H)
-#include <sys/statvfs.h>
-#endif
-
-#if defined(UNIV_LINUX) && defined(HAVE_LINUX_FALLOC_H)
-#include <linux/falloc.h>
-#endif
-
 #ifdef _WIN32
 #include <winioctl.h>
+#else
+// my_test_if_atomic_write()
+#include <my_sys.h>
 #endif
+
 
 /** Insert buffer segment id */
 static const ulint IO_IBUF_SEGMENT = 0;
@@ -821,108 +817,6 @@ os_win32_device_io_control(
 
 #endif
 
-/***********************************************************************//**
-Try to get number of bytes per sector from file system.
-@return	file block size */
-UNIV_INTERN
-ulint
-os_file_get_block_size(
-/*===================*/
-	os_file_t	file,	/*!< in: handle to a file */
-	const char*	name)	/*!< in: file name */
-{
-	ulint		fblock_size = 512;
-
-#if defined(UNIV_LINUX)
-	struct stat local_stat;
-	int		err;
-
-	err = fstat((int)file, &local_stat);
-
-	if (err != 0) {
-		os_file_handle_error_no_exit(name, "fstat()", FALSE);
-	} else {
-		fblock_size = local_stat.st_blksize;
-	}
-#endif /* UNIV_LINUX */
-#ifdef _WIN32
-
-	fblock_size = 0;
-	BOOL result = false;
-	size_t len = 0;
-	// Open volume for this file, find out it "physical bytes per sector"
-
-	HANDLE volume_handle = INVALID_HANDLE_VALUE;
-	char volume[MAX_PATH + 4]="\\\\.\\"; // Special prefix required for volume names.
-	if (!GetVolumePathName(name , volume + 4, MAX_PATH)) {
-		os_file_handle_error_no_exit(name,
-			"GetVolumePathName()", FALSE);
-		goto end;
-	}
-
-	len = strlen(volume);
-	if (volume[len - 1] == '\\') {
-		// Trim trailing backslash from volume name.
-		volume[len - 1] = 0;
-	}
-
-	volume_handle = CreateFile(volume, FILE_READ_ATTRIBUTES,
-		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-		0, OPEN_EXISTING, 0, 0);
-
-	if (volume_handle == INVALID_HANDLE_VALUE) {
-		if (GetLastError() != ERROR_ACCESS_DENIED) {
-			os_file_handle_error_no_exit(volume,
-				"CreateFile()", FALSE);
-		}
-		goto end;
-	}
-
-	DWORD tmp;
-	STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR disk_alignment;
-
-	STORAGE_PROPERTY_QUERY storage_query;
-	memset(&storage_query, 0, sizeof(storage_query));
-	storage_query.PropertyId = StorageAccessAlignmentProperty;
-	storage_query.QueryType  = PropertyStandardQuery;
-
-	result = os_win32_device_io_control(volume_handle,
-		IOCTL_STORAGE_QUERY_PROPERTY,
-		&storage_query,
-		sizeof(storage_query),
-		&disk_alignment,
-		sizeof(disk_alignment),
-		&tmp);
-
-	if (!result) {
-		DWORD err = GetLastError();
-		if (err != ERROR_INVALID_FUNCTION && err != ERROR_NOT_SUPPORTED) {
-				os_file_handle_error_no_exit(volume,
-					"DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY)", FALSE);
-		}
-		goto end;
-	}
-
-	fblock_size = disk_alignment.BytesPerPhysicalSector;
-
-end:
-	if (volume_handle != INVALID_HANDLE_VALUE) {
-		CloseHandle(volume_handle);
-	}
-#endif /* _WIN32 */
-
-	/* Currently we support file block size up to 4Kb */
-	if (fblock_size > 4096 || fblock_size < 512) {
-		if (fblock_size < 512) {
-			fblock_size = 512;
-		} else {
-			fblock_size = 4096;
-		}
-	}
-
-	return fblock_size;
-}
-
 #ifdef WIN_ASYNC_IO
 /** This function is only used in Windows asynchronous i/o.
 Waits for an aio operation to complete. This function is used to wait the
@@ -1084,15 +978,8 @@ os_aio_validate_skip()
 /** Try os_aio_validate() every this many times */
 # define OS_AIO_VALIDATE_SKIP	13
 
-	static int os_aio_validate_count;
-
-	if (my_atomic_add32_explicit(&os_aio_validate_count, -1,
-				     MY_MEMORY_ORDER_RELAXED)
-	    % OS_AIO_VALIDATE_SKIP) {
-		return true;
-	}
-
-	return(os_aio_validate());
+	static Atomic_counter<uint32_t> os_aio_validate_count;
+	return (os_aio_validate_count++ % OS_AIO_VALIDATE_SKIP) || os_aio_validate();
 }
 #endif /* UNIV_DEBUG */
 
@@ -1762,6 +1649,8 @@ LinuxAIOHandler::resubmit(Slot* slot)
 	slot->n_bytes = 0;
 	slot->io_already_done = false;
 
+	compile_time_assert(sizeof(off_t) >= sizeof(os_offset_t));
+
 	struct iocb*	iocb = &slot->control;
 
 	if (slot->type.is_read()) {
@@ -1771,7 +1660,7 @@ LinuxAIOHandler::resubmit(Slot* slot)
 			slot->file,
 			slot->ptr,
 			slot->len,
-			static_cast<off_t>(slot->offset));
+			slot->offset);
 	} else {
 
 		ut_a(slot->type.is_write());
@@ -1781,7 +1670,7 @@ LinuxAIOHandler::resubmit(Slot* slot)
 			slot->file,
 			slot->ptr,
 			slot->len,
-			static_cast<off_t>(slot->offset));
+			slot->offset);
 	}
 
 	iocb->data = slot;
@@ -1956,10 +1845,24 @@ LinuxAIOHandler::collect()
 			will be done in the calling function. */
 			m_array->acquire();
 
-			slot->ret = events[i].res2;
+			/* events[i].res2 should always be ZERO */
+			ut_ad(events[i].res2 == 0);
 			slot->io_already_done = true;
-			slot->n_bytes = events[i].res;
 
+			/*Even though events[i].res is an unsigned number
+			in libaio, it is used to return a negative value
+			(negated errno value) to indicate error and a positive
+			value to indicate number of bytes read or written. */
+
+			if (events[i].res > slot->len) {
+				/* failure */
+				slot->n_bytes = 0;
+				slot->ret = events[i].res;
+			} else {
+				/* success */
+				slot->n_bytes = events[i].res;
+				slot->ret = 0;
+			}
 			m_array->release();
 		}
 
@@ -2489,18 +2392,10 @@ os_file_fsync_posix(
 			ut_a(failures < 2000);
 			break;
 
-		case EIO:
-			ib::error() << "fsync() returned EIO, aborting";
-			/* fall through */
 		default:
-			ut_error;
-			break;
+			ib::fatal() << "fsync() returned " << errno;
 		}
 	}
-
-	ut_error;
-
-	return(-1);
 }
 
 /** Check the existence and type of the given file.
@@ -3516,8 +3411,6 @@ static WinIoInit win_io_init;
 
 /** Free storage space associated with a section of the file.
 @param[in]	fh		Open file handle
-@param[in]	page_size	Tablespace page size
-@param[in]	block_size	File system block size
 @param[in]	off		Starting offset (SEEK_SET)
 @param[in]	len		Size of the hole
 @return 0 on success or errno */
@@ -4976,7 +4869,8 @@ Requests a synchronous write operation.
 @param[out]	buf		buffer from which to write
 @param[in]	offset		file offset from the start where to read
 @param[in]	n		number of bytes to read, starting from offset
-@return DB_SUCCESS if request was successful, false if fail */
+@return error code
+@retval	DB_SUCCESS	if the operation succeeded */
 dberr_t
 os_file_write_func(
 	const IORequest&	type,
@@ -5270,6 +5164,34 @@ short_warning:
 
 #endif /* _WIN32 */
 
+/** Check if the file system supports sparse files.
+@param fh	file handle
+@return true if the file system supports sparse files */
+IF_WIN(static,) bool os_is_sparse_file_supported(os_file_t fh)
+{
+	/* In this debugging mode, we act as if punch hole is supported,
+	then we skip any calls to actually punch a hole.  In this way,
+	Transparent Page Compression is still being tested. */
+	DBUG_EXECUTE_IF("ignore_punch_hole",
+		return(true);
+	);
+
+#ifdef _WIN32
+	FILE_ATTRIBUTE_TAG_INFO info;
+	if (GetFileInformationByHandleEx(fh, FileAttributeTagInfo,
+		&info, (DWORD)sizeof(info))) {
+		if (info.FileAttributes != INVALID_FILE_ATTRIBUTES) {
+			return (info.FileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) != 0;
+		}
+	}
+	return false;
+#else
+	/* We don't know the FS block size, use the sector size. The FS
+	will do the magic. */
+	return DB_SUCCESS == os_file_punch_hole_posix(fh, 0, srv_page_size);
+#endif /* _WIN32 */
+}
+
 /** Extend a file.
 
 On Windows, extending a file allocates blocks for the file,
@@ -5433,7 +5355,8 @@ Requests a synchronous positioned read operation.
 @param[out]	buf		buffer where to read
 @param[in]	offset		file offset from the start where to read
 @param[in]	n		number of bytes to read, starting from offset
-@return DB_SUCCESS or error code */
+@return error code
+@retval	DB_SUCCESS	if the operation succeeded */
 dberr_t
 os_file_read_func(
 	const IORequest&	type,
@@ -5497,15 +5420,16 @@ os_file_punch_hole(
 	os_offset_t	off,
 	os_offset_t	len)
 {
-	dberr_t err;
-
 #ifdef _WIN32
-	err = os_file_punch_hole_win32(fh, off, len);
+	return os_file_punch_hole_win32(fh, off, len);
 #else
-	err = os_file_punch_hole_posix(fh, off, len);
+	return os_file_punch_hole_posix(fh, off, len);
 #endif /* _WIN32 */
+}
 
-	return (err);
+inline bool IORequest::should_punch_hole() const
+{
+	return m_fil_node && m_fil_node->space->punch_hole;
 }
 
 /** Free storage space associated with a section of the file.
@@ -5545,49 +5469,14 @@ IORequest::punch_hole(os_file_t fh, os_offset_t off, ulint len)
 		/* If punch hole is not supported,
 		set space so that it is not used. */
 		if (err == DB_IO_NO_PUNCH_HOLE) {
-			space_no_punch_hole();
+			if (m_fil_node) {
+				m_fil_node->space->punch_hole = false;
+			}
 			err = DB_SUCCESS;
 		}
 	}
 
 	return (err);
-}
-
-/** Check if the file system supports sparse files.
-
-Warning: On POSIX systems we try and punch a hole from offset 0 to
-the system configured page size. This should only be called on an empty
-file.
-@param[in]	fh		File handle for the file - if opened
-@return true if the file system supports sparse files */
-bool
-os_is_sparse_file_supported(os_file_t fh)
-{
-	/* In this debugging mode, we act as if punch hole is supported,
-	then we skip any calls to actually punch a hole.  In this way,
-	Transparent Page Compression is still being tested. */
-	DBUG_EXECUTE_IF("ignore_punch_hole",
-		return(true);
-	);
-
-#ifdef _WIN32
-	FILE_ATTRIBUTE_TAG_INFO info;
-	if (GetFileInformationByHandleEx(fh, FileAttributeTagInfo,
-		&info, (DWORD)sizeof(info))) {
-		if (info.FileAttributes != INVALID_FILE_ATTRIBUTES) {
-			return (info.FileAttributes & FILE_ATTRIBUTE_SPARSE_FILE) != 0;
-		}
-	}
-	return false;
-#else
-	dberr_t	err;
-
-	/* We don't know the FS block size, use the sector size. The FS
-	will do the magic. */
-	err = os_file_punch_hole_posix(fh, 0, srv_page_size);
-
-	return(err == DB_SUCCESS);
-#endif /* _WIN32 */
 }
 
 /** This function returns information about the specified file
@@ -5724,7 +5613,7 @@ AIO::AIO(
 	m_not_full = os_event_create("aio_not_full");
 	m_is_empty = os_event_create("aio_is_empty");
 
-	memset(&m_slots[0], 0x0, sizeof(m_slots[0]) * m_slots.size());
+	memset((void*)&m_slots[0], 0x0, sizeof(m_slots[0]) * m_slots.size());
 #ifdef LINUX_NATIVE_AIO
 	memset(&m_events[0], 0x0, sizeof(m_events[0]) * m_events.size());
 #endif /* LINUX_NATIVE_AIO */
@@ -6260,7 +6149,7 @@ AIO::reserve_slot(
 #ifdef _WIN32
 	slot->len      = static_cast<DWORD>(len);
 #else
-	slot->len      = static_cast<ulint>(len);
+	slot->len      = len;
 #endif /* _WIN32 */
 	slot->type     = type;
 	slot->buf      = static_cast<byte*>(buf);
@@ -7617,6 +7506,305 @@ void
 os_file_set_umask(ulint umask)
 {
 	os_innodb_umask = umask;
+}
+
+#ifdef _WIN32
+static int win32_get_block_size(HANDLE volume_handle, const char *volume_name)
+{
+  STORAGE_ACCESS_ALIGNMENT_DESCRIPTOR disk_alignment;
+  STORAGE_PROPERTY_QUERY storage_query;
+  DWORD tmp;
+
+  memset(&storage_query, 0, sizeof(storage_query));
+  storage_query.PropertyId = StorageAccessAlignmentProperty;
+  storage_query.QueryType = PropertyStandardQuery;
+
+  if (os_win32_device_io_control(volume_handle,
+    IOCTL_STORAGE_QUERY_PROPERTY,
+    &storage_query,
+    sizeof storage_query,
+    &disk_alignment,
+    sizeof disk_alignment,
+    &tmp) &&  tmp == sizeof disk_alignment) {
+      return disk_alignment.BytesPerPhysicalSector;
+  }
+
+  switch (GetLastError()) {
+    case ERROR_INVALID_FUNCTION:
+    case ERROR_NOT_SUPPORTED:
+      break;
+    default:
+      os_file_handle_error_no_exit(
+        volume_name,
+        "DeviceIoControl(IOCTL_STORAGE_QUERY_PROPERTY / StorageAccessAlignmentProperty)",
+        FALSE);
+   }
+   return 512;
+}
+
+static bool win32_is_ssd(HANDLE volume_handle)
+{
+  DWORD tmp;
+  DEVICE_SEEK_PENALTY_DESCRIPTOR seek_penalty;
+  STORAGE_PROPERTY_QUERY storage_query;
+  memset(&storage_query, 0, sizeof(storage_query));
+
+  storage_query.PropertyId = StorageDeviceSeekPenaltyProperty;
+  storage_query.QueryType = PropertyStandardQuery;
+
+  if (os_win32_device_io_control(volume_handle,
+    IOCTL_STORAGE_QUERY_PROPERTY,
+    &storage_query,
+    sizeof storage_query,
+    &seek_penalty,
+    sizeof seek_penalty,
+    &tmp) && tmp == sizeof(seek_penalty)){
+      return !seek_penalty.IncursSeekPenalty;
+  }
+
+  DEVICE_TRIM_DESCRIPTOR trim;
+  storage_query.PropertyId = StorageDeviceTrimProperty;
+  if (os_win32_device_io_control(volume_handle,
+    IOCTL_STORAGE_QUERY_PROPERTY,
+    &storage_query,
+    sizeof storage_query,
+    &trim,
+    sizeof trim,
+    &tmp) && tmp == sizeof trim) {
+      return trim.TrimEnabled;
+  }
+  return false;
+}
+#endif
+
+/** Determine some file metadata when creating or reading the file.
+@param	file	the file that is being created, or OS_FILE_CLOSED */
+void fil_node_t::find_metadata(os_file_t file
+#ifdef UNIV_LINUX
+			       , struct stat* statbuf
+#endif
+			       )
+{
+	if (file == OS_FILE_CLOSED) {
+		file = handle;
+		ut_ad(is_open());
+	}
+
+#ifdef _WIN32 /* FIXME: make this unconditional */
+	if (space->punch_hole) {
+		space->punch_hole = os_is_sparse_file_supported(file);
+	}
+#endif
+
+	/*
+	For the temporary tablespace and during the
+	non-redo-logged adjustments in
+	IMPORT TABLESPACE, we do not care about
+	the atomicity of writes.
+
+	Atomic writes is supported if the file can be used
+	with atomic_writes (not log file), O_DIRECT is
+	used (tested in ha_innodb.cc) and the file is
+	device and file system that supports atomic writes
+	for the given block size.
+	*/
+	space->atomic_write_supported = space->purpose == FIL_TYPE_TEMPORARY
+		|| space->purpose == FIL_TYPE_IMPORT;
+#ifdef _WIN32
+	block_size = 512;
+	on_ssd = false;
+	// Open volume for this file, find out it "physical bytes per sector"
+	char volume[MAX_PATH + 4];
+	if (!GetVolumePathName(name, volume + 4, MAX_PATH)) {
+		os_file_handle_error_no_exit(name,
+			"GetVolumePathName()", FALSE);
+		return;
+	}
+	// Special prefix required for volume names.
+	memcpy(volume, "\\\\.\\", 4);
+
+	size_t len = strlen(volume);
+	if (volume[len - 1] == '\\') {
+		// Trim trailing backslash from volume name.
+		volume[len - 1] = 0;
+	}
+
+	HANDLE volume_handle = CreateFile(volume, FILE_READ_ATTRIBUTES,
+		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		0, OPEN_EXISTING, 0, 0);
+
+	if (volume_handle != INVALID_HANDLE_VALUE) {
+		block_size = win32_get_block_size(volume_handle, volume);
+		on_ssd = win32_is_ssd(volume_handle);
+		CloseHandle(volume_handle);
+	} else {
+		if (GetLastError() != ERROR_ACCESS_DENIED) {
+			os_file_handle_error_no_exit(volume,
+				"CreateFile()", FALSE);
+		}
+	}
+
+	/* Currently we support file block size up to 4KiB */
+	if (block_size > 4096) {
+		block_size = 4096;
+	} else if (block_size < 512) {
+		block_size = 512;
+	}
+#else
+	on_ssd = space->atomic_write_supported;
+# ifdef UNIV_LINUX
+	if (!on_ssd) {
+		struct stat sbuf;
+		if (!statbuf && !fstat(file, &sbuf)) {
+			statbuf = &sbuf;
+		}
+		if (statbuf && fil_system.is_ssd(statbuf->st_dev)) {
+			on_ssd = true;
+		}
+	}
+# endif
+#endif
+	if (!space->atomic_write_supported) {
+		space->atomic_write_supported = atomic_write
+			&& srv_use_atomic_writes
+#ifndef _WIN32
+			&& my_test_if_atomic_write(file,
+						   space->physical_size())
+#else
+			/* On Windows, all single sector writes are atomic,
+			as per WriteFile() documentation on MSDN.
+			We also require SSD for atomic writes, eventhough
+			technically it is not necessary- the reason is that
+			on hard disks, we still want the benefit from
+			(non-atomic) neighbor page flushing in the buffer
+			pool code. */
+			&& srv_page_size == block_size
+			&& on_ssd
+#endif
+			;
+	}
+}
+
+/** Read the first page of a data file.
+@param[in]	first	whether this is the very first read
+@return	whether the page was found valid */
+bool fil_node_t::read_page0(bool first)
+{
+	ut_ad(mutex_own(&fil_system.mutex));
+	ut_a(space->purpose != FIL_TYPE_LOG);
+	const ulint psize = space->physical_size();
+#ifndef _WIN32
+	struct stat statbuf;
+	if (fstat(handle, &statbuf)) {
+		return false;
+	}
+	block_size = statbuf.st_blksize;
+	os_offset_t size_bytes = statbuf.st_size;
+#else
+	os_offset_t size_bytes = os_file_get_size(handle);
+	ut_a(size_bytes != (os_offset_t) -1);
+#endif
+	const ulint min_size = FIL_IBD_FILE_INITIAL_SIZE * psize;
+
+	if (size_bytes < min_size) {
+		ib::error() << "The size of the file " << name
+			    << " is only " << size_bytes
+			    << " bytes, should be at least " << min_size;
+		return false;
+	}
+
+	byte* buf2 = static_cast<byte*>(ut_malloc_nokey(2 * psize));
+
+	/* Align the memory for file i/o if we might have O_DIRECT set */
+	byte* page = static_cast<byte*>(ut_align(buf2, psize));
+	IORequest request(IORequest::READ);
+	if (os_file_read(request, handle, page, 0, psize) != DB_SUCCESS) {
+		ib::error() << "Unable to read first page of file " << name;
+		ut_free(buf2);
+		return false;
+	}
+	const ulint space_id = fsp_header_get_space_id(page);
+	ulint flags = fsp_header_get_flags(page);
+	const ulint size = fsp_header_get_field(page, FSP_SIZE);
+	const ulint free_limit = fsp_header_get_field(page, FSP_FREE_LIMIT);
+	const ulint free_len = flst_get_len(FSP_HEADER_OFFSET + FSP_FREE
+					    + page);
+	if (!fil_space_t::is_valid_flags(flags, space->id)) {
+		ulint cflags = fsp_flags_convert_from_101(flags);
+		if (cflags == ULINT_UNDEFINED) {
+invalid:
+			ib::error()
+				<< "Expected tablespace flags "
+				<< ib::hex(space->flags)
+				<< " but found " << ib::hex(flags)
+				<< " in the file " << name;
+			ut_free(buf2);
+			return false;
+		}
+
+		ulint cf = cflags & ~FSP_FLAGS_MEM_MASK;
+		ulint sf = space->flags & ~FSP_FLAGS_MEM_MASK;
+
+		if (!fil_space_t::is_flags_equal(cf, sf)
+		    && !fil_space_t::is_flags_equal(sf, cf)) {
+			goto invalid;
+		}
+
+		flags = cflags;
+	}
+
+	ut_ad(!(flags & FSP_FLAGS_MEM_MASK));
+
+	/* Try to read crypt_data from page 0 if it is not yet read. */
+	if (!space->crypt_data) {
+		space->crypt_data = fil_space_read_crypt_data(
+			fil_space_t::zip_size(flags), page);
+	}
+	ut_free(buf2);
+
+	if (UNIV_UNLIKELY(space_id != space->id)) {
+		ib::error() << "Expected tablespace id " << space->id
+			<< " but found " << space_id
+			<< " in the file " << name;
+		return false;
+	}
+
+	if (first) {
+		ut_ad(space->id != TRX_SYS_SPACE);
+#ifdef UNIV_LINUX
+		find_metadata(handle, &statbuf);
+#else
+		find_metadata();
+#endif
+
+		/* Truncate the size to a multiple of extent size. */
+		ulint	mask = psize * FSP_EXTENT_SIZE - 1;
+
+		if (size_bytes <= mask) {
+			/* .ibd files start smaller than an
+			extent size. Do not truncate valid data. */
+		} else {
+			size_bytes &= ~os_offset_t(mask);
+		}
+
+		space->flags = (space->flags & FSP_FLAGS_MEM_MASK) | flags;
+
+		this->size = ulint(size_bytes / psize);
+		space->size += this->size;
+	} else if (space->id != TRX_SYS_SPACE || space->size_in_header) {
+		/* If this is not the first-time open, do nothing.
+		For the system tablespace, we always get invoked as
+		first=false, so we detect the true first-time-open based
+		on size_in_header and proceed to initiailze the data. */
+		return true;
+	}
+
+	ut_ad(space->free_limit == 0 || space->free_limit == free_limit);
+	ut_ad(space->free_len == 0 || space->free_len == free_len);
+	space->size_in_header = size;
+	space->free_limit = free_limit;
+	space->free_len = free_len;
+	return true;
 }
 
 #else

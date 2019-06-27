@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software Foundation,
-   51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA */
+   51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 
 /**
@@ -253,16 +253,11 @@ static void track_table_access(THD *thd, TABLE **tables, size_t count)
 {
   if (thd->variables.session_track_transaction_info > TX_TRACK_NONE)
   {
-    Transaction_state_tracker *tst= (Transaction_state_tracker *)
-      thd->session_tracker.get_tracker(TRANSACTION_INFO_TRACKER);
-
     while (count--)
     {
-      TABLE *t= tables[count];
-
-      if (t)
-        tst->add_trx_state(thd,  t->reginfo.lock_type,
-                           t->file->has_transaction_manager());
+      if (TABLE *t= tables[count])
+        thd->session_tracker.transaction_info.add_trx_state(thd,
+          t->reginfo.lock_type, t->file->has_transaction_manager());
     }
   }
 }
@@ -1034,7 +1029,12 @@ bool Global_read_lock::lock_global_read_lock(THD *thd)
       DBUG_RETURN(1);
     }
 
+    /*
+      Release HANDLER OPEN by the current THD as they may cause deadlocks
+      if another thread is trying to simultaneous drop the table
+    */
     mysql_ha_cleanup_no_free(thd);
+    DEBUG_SYNC(thd, "ftwrl_before_lock");
 
     DBUG_ASSERT(! thd->mdl_context.is_lock_owner(MDL_key::BACKUP, "", "",
                                                  MDL_BACKUP_FTWRL1));
@@ -1100,20 +1100,17 @@ void Global_read_lock::unlock_global_read_lock(THD *thd)
 #ifdef WITH_WSREP
   if (m_state == GRL_ACQUIRED_AND_BLOCKS_COMMIT)
   {
-    if (WSREP(thd) || wsrep_node_is_donor())
+    Wsrep_server_state& server_state= Wsrep_server_state::instance();
+    if (server_state.state() == Wsrep_server_state::s_donor ||
+        (wsrep_on(thd) && server_state.state() != Wsrep_server_state::s_synced))
     {
+      /* TODO: maybe redundant here?: */
       wsrep_locked_seqno= WSREP_SEQNO_UNDEFINED;
-      wsrep->resume(wsrep);
-      /* resync here only if we did implicit desync earlier */
-      if (!wsrep_desync && wsrep_node_is_synced())
-      {
-        int ret = wsrep->resync(wsrep);
-        if (ret != WSREP_OK)
-        {
-          WSREP_WARN("resync failed %d for FTWRL: db: %s, query: %s",
-                     ret, thd->get_db(), thd->query());
-        }
-      }
+      server_state.resume();
+    }
+    else if (wsrep_on(thd) && server_state.state() == Wsrep_server_state::s_synced)
+    {
+      server_state.resume_and_resync();
     }
   }
 #endif /* WITH_WSREP */
@@ -1159,62 +1156,30 @@ bool Global_read_lock::make_global_read_lock_block_commit(THD *thd)
   m_state= GRL_ACQUIRED_AND_BLOCKS_COMMIT;
 
 #ifdef WITH_WSREP
-  /* Native threads should bail out before wsrep oprations to follow.
-     Donor servicing thread is an exception, it should pause provider but not desync,
-     as it is already desynced in donor state
+  /* Native threads should bail out before wsrep operations to follow.
+     Donor servicing thread is an exception, it should pause provider
+     but not desync, as it is already desynced in donor state.
+     Desync should be called only when we are in synced state.
   */
-  if (!WSREP(thd) && !wsrep_node_is_donor())
+  Wsrep_server_state& server_state= Wsrep_server_state::instance();
+  wsrep::seqno paused_seqno;
+  if (server_state.state() == Wsrep_server_state::s_donor ||
+      (wsrep_on(thd) && server_state.state() != Wsrep_server_state::s_synced))
   {
-    DBUG_RETURN(FALSE);
+    paused_seqno= server_state.pause();
   }
-
-  /* if already desynced or donor, avoid double desyncing 
-     if not in PC and synced, desyncing is not possible either
-  */
-  if (wsrep_desync || !wsrep_node_is_synced())
+  else if (wsrep_on(thd) && server_state.state() == Wsrep_server_state::s_synced)
   {
-    WSREP_DEBUG("desync set upfont, skipping implicit desync for FTWRL: %d",
-                wsrep_desync);
+    paused_seqno= server_state.desync_and_pause();
   }
   else
   {
-    int rcode;
-    WSREP_DEBUG("running implicit desync for node");
-    rcode = wsrep->desync(wsrep);
-    if (rcode != WSREP_OK)
-    {
-      WSREP_WARN("FTWRL desync failed %d for schema: %s, query: %s",
-                 rcode, thd->get_db(), thd->query());
-      my_message(ER_LOCK_DEADLOCK, "wsrep desync failed for FTWRL", MYF(0));
-      DBUG_RETURN(TRUE);
-    }
+    DBUG_RETURN(FALSE);
   }
-
-  long long ret = wsrep->pause(wsrep);
-  if (ret >= 0)
+  WSREP_INFO("Server paused at: %lld", paused_seqno.get());
+  if (paused_seqno.get() >= 0)
   {
-    wsrep_locked_seqno= ret;
-  }
-  else if (ret != -ENOSYS) /* -ENOSYS - no provider */
-  {
-    long long ret = wsrep->pause(wsrep);
-    if (ret >= 0)
-    {
-      wsrep_locked_seqno= ret;
-    }
-    else if (ret != -ENOSYS) /* -ENOSYS - no provider */
-    {
-      WSREP_ERROR("Failed to pause provider: %lld (%s)", -ret, strerror(-ret));
-
-      /*
-        For some reason Galera wants to crash here in debug build.
-        It is equivalent of original assertion.
-      */
-      DBUG_ASSERT(0);
-      wsrep_locked_seqno= WSREP_SEQNO_UNDEFINED;
-      my_error(ER_LOCK_DEADLOCK, MYF(0));
-      DBUG_RETURN(TRUE);
-     }
+    wsrep_locked_seqno= paused_seqno.get();
   }
 #endif /* WITH_WSREP */
   DBUG_RETURN(FALSE);

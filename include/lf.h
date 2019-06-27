@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifndef INCLUDE_LF_INCLUDED
 #define INCLUDE_LF_INCLUDED
@@ -167,6 +167,8 @@ void *lf_hash_search_using_hash_value(LF_HASH *hash, LF_PINS *pins,
 int lf_hash_delete(LF_HASH *hash, LF_PINS *pins, const void *key, uint keylen);
 int lf_hash_iterate(LF_HASH *hash, LF_PINS *pins,
                     my_hash_walk_action action, void *argument);
+#define lf_hash_size(hash) \
+  my_atomic_load32_explicit(&(hash)->count, MY_MEMORY_ORDER_RELAXED)
 /*
   shortcut macros to access underlying pinbox functions from an LF_HASH
   see lf_pinbox_get_pins() and lf_pinbox_put_pins()

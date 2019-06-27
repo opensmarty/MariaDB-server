@@ -253,6 +253,7 @@ static bool backup_block_ddl(THD *thd)
     backup stage even if we got an error.
   */
   (void) flush_tables(thd, FLUSH_NON_TRANS_TABLES);
+  thd->clear_error();
 
   /*
     block new DDL's, in addition to all previous blocks
@@ -286,7 +287,11 @@ static bool backup_block_commit(THD *thd)
                                            MDL_BACKUP_WAIT_COMMIT,
                                            thd->variables.lock_wait_timeout))
     DBUG_RETURN(1);
-  flush_tables(thd, FLUSH_SYS_TABLES);
+
+  /* We can ignore errors from flush_tables () */
+  (void) flush_tables(thd, FLUSH_SYS_TABLES);
+  thd->clear_error();
+
   DBUG_RETURN(0);
 }
 
@@ -353,4 +358,33 @@ bool backup_reset_alter_copy_lock(THD *thd)
     res= thd->mdl_context.upgrade_shared_lock(ticket, MDL_BACKUP_DDL,
                                               thd->variables.lock_wait_timeout);
   return res;
+}
+
+
+/*****************************************************************************
+ Backup locks
+ These functions are used by maria_backup to ensure that there are no active
+ ddl's on the object the backup is going to copy
+*****************************************************************************/
+
+
+bool backup_lock(THD *thd, TABLE_LIST *table)
+{
+  backup_unlock(thd);
+  table->mdl_request.duration= MDL_EXPLICIT;
+  if (thd->mdl_context.acquire_lock(&table->mdl_request,
+                                    thd->variables.lock_wait_timeout))
+    return 1;
+  thd->mdl_backup_lock= table->mdl_request.ticket;
+  return 0;
+}
+
+
+/* Release old backup lock if it exists */
+
+void backup_unlock(THD *thd)
+{
+  if (thd->mdl_backup_lock)
+    thd->mdl_context.release_lock(thd->mdl_backup_lock);
+  thd->mdl_backup_lock= 0;
 }

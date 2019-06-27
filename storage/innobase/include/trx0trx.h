@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2018, MariaDB Corporation.
+Copyright (c) 2015, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -41,19 +41,8 @@ Created 3/26/1996 Heikki Tuuri
 
 // Forward declaration
 struct mtr_t;
-
-// Forward declaration
 class FlushObserver;
-
 struct rw_trx_hash_element_t;
-
-/** Set flush observer for the transaction
-@param[in/out]	trx		transaction struct
-@param[in]	observer	flush observer */
-void
-trx_set_flush_observer(
-	trx_t*		trx,
-	FlushObserver*	observer);
 
 /******************************************************************//**
 Set detailed error message for the transaction. */
@@ -458,7 +447,7 @@ Check transaction state */
 	ut_ad(!trx_is_autocommit_non_locking((t)));			\
 	switch ((t)->state) {						\
 	case TRX_STATE_PREPARED:					\
-		/* fall through */					\
+	case TRX_STATE_PREPARED_RECOVERED:				\
 	case TRX_STATE_ACTIVE:						\
 	case TRX_STATE_COMMITTED_IN_MEMORY:				\
 		continue;						\
@@ -577,6 +566,11 @@ struct trx_lock_t {
 					lock_sys.mutex. Otherwise, this may
 					only be modified by the thread that is
 					serving the running transaction. */
+#ifdef WITH_WSREP
+	bool		was_chosen_as_wsrep_victim;
+					/*!< high priority wsrep thread has
+					marked this trx to abort */
+#endif /* WITH_WSREP */
 
 	/** Pre-allocated record locks */
 	struct {
@@ -696,7 +690,7 @@ with exactly one user transaction. There are some exceptions to this:
 
 * For DDL operations, a subtransaction is allocated that modifies the
 data dictionary tables. Lock waits and deadlocks are prevented by
-acquiring the dict_operation_lock before starting the subtransaction
+acquiring the dict_sys.latch before starting the subtransaction
 and releasing it after committing the subtransaction.
 
 * The purge system uses a special transaction that is not associated
@@ -773,7 +767,7 @@ private:
     that it is no longer "active".
   */
 
-  int32_t n_ref;
+  Atomic_counter<int32_t> n_ref;
 
 
 public:
@@ -800,6 +794,7 @@ public:
 	TRX_STATE_NOT_STARTED
 	TRX_STATE_ACTIVE
 	TRX_STATE_PREPARED
+	TRX_STATE_PREPARED_RECOVERED (special case of TRX_STATE_PREPARED)
 	TRX_STATE_COMMITTED_IN_MEMORY (alias below COMMITTED)
 
 	Valid state transitions are:
@@ -929,8 +924,8 @@ public:
 	ib_uint32_t	dict_operation_lock_mode;
 					/*!< 0, RW_S_LATCH, or RW_X_LATCH:
 					the latch mode trx currently holds
-					on dict_operation_lock. Protected
-					by dict_operation_lock. */
+					on dict_sys.latch. Protected
+					by dict_sys.latch. */
 
 	time_t		start_time;	/*!< time the state last time became
 					TRX_STATE_ACTIVE */
@@ -1058,8 +1053,11 @@ public:
 	/*------------------------------*/
 	char*		detailed_error;	/*!< detailed error message for last
 					error, or empty. */
-	FlushObserver*	flush_observer;	/*!< flush observer */
-
+private:
+	/** flush observer used to track flushing of non-redo logged pages
+	during bulk create index */
+	FlushObserver*	flush_observer;
+public:
 	/* Lock wait statistics */
 	ulint		n_rec_lock_waits;
 					/*!< Number of record lock waits,
@@ -1112,6 +1110,20 @@ public:
 		return(assign_temp_rseg());
 	}
 
+	/** Set the innodb_log_optimize_ddl page flush observer
+	@param[in,out]	space	tablespace
+	@param[in,out]	stage	performance_schema accounting */
+	void set_flush_observer(fil_space_t* space, ut_stage_alter_t* stage);
+
+	/** Remove the flush observer */
+	void remove_flush_observer();
+
+	/** @return the flush observer */
+	FlushObserver* get_flush_observer() const
+	{
+		return flush_observer;
+	}
+
 	/** Evict a table definition due to the rollback of ALTER TABLE.
 	@param[in]	table_id	table identifier */
 	void evict_table(table_id_t table_id);
@@ -1119,16 +1131,16 @@ public:
 
   bool is_referenced()
   {
-    return my_atomic_load32_explicit(&n_ref, MY_MEMORY_ORDER_RELAXED) > 0;
+    return n_ref > 0;
   }
 
 
   void reference()
   {
 #ifdef UNIV_DEBUG
-  int32_t old_n_ref=
+    auto old_n_ref=
 #endif
-    my_atomic_add32_explicit(&n_ref, 1, MY_MEMORY_ORDER_RELAXED);
+    n_ref++;
     ut_ad(old_n_ref >= 0);
   }
 
@@ -1136,9 +1148,9 @@ public:
   void release_reference()
   {
 #ifdef UNIV_DEBUG
-  int32_t old_n_ref=
+    auto old_n_ref=
 #endif
-    my_atomic_add32_explicit(&n_ref, -1, MY_MEMORY_ORDER_RELAXED);
+    n_ref--;
     ut_ad(old_n_ref > 0);
   }
 

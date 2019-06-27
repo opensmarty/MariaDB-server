@@ -12,7 +12,7 @@
 # 
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335 USA
 
 # Build comp_sql - used for embedding SQL in C or C++ programs
 IF(NOT CMAKE_CROSSCOMPILING)
@@ -249,7 +249,7 @@ IF(WIN32)
   # The resulting files will have .pl extension (those are perl scripts)
 
   # Input files with pl.in extension
-  SET(PLIN_FILES mysql_config mysql_secure_installation)
+  SET(PLIN_FILES mysql_config)
   # Input files with .sh extension
 
   SET(SH_FILES mysql_convert_table_format mysqld_multi mysqldumpslow
@@ -274,8 +274,6 @@ ELSE()
     SET(WSREP_SCRIPTS
       wsrep_sst_mysqldump
       wsrep_sst_rsync
-      wsrep_sst_xtrabackup
-      wsrep_sst_xtrabackup-v2
       wsrep_sst_mariabackup
     )
     # The following script is sourced from other SST scripts, so it should
@@ -334,6 +332,7 @@ ELSE()
       COMPONENT ${${file}_COMPONENT}
      )
   ENDFOREACH()
+
   SET (wsrep_sst_rsync_wan ${CMAKE_CURRENT_BINARY_DIR}/wsrep_sst_rsync_wan)
   ADD_CUSTOM_COMMAND(
     OUTPUT ${wsrep_sst_rsync_wan}

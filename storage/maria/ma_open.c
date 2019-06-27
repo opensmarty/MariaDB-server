@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /* open an Aria table */
 
@@ -1386,7 +1386,7 @@ uint _ma_state_info_write(MARIA_SHARE *share, uint pWrite)
 
   if (pWrite & MA_STATE_INFO_WRITE_LOCK)
     mysql_mutex_lock(&share->intern_lock);
-  else if (maria_multi_threaded)
+  else if (maria_multi_threaded && !share->temporary)
     mysql_mutex_assert_owner(&share->intern_lock);
   if (share->base.born_transactional && translog_status == TRANSLOG_OK &&
       !maria_in_recovery)

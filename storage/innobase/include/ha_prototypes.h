@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2006, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -40,7 +40,6 @@ class THD;
 // JAN: TODO missing features:
 #undef MYSQL_FT_INIT_EXT
 #undef MYSQL_PFS
-#undef MYSQL_RENAME_INDEX
 #undef MYSQL_STORE_FTS_DOC_ID
 
 /*******************************************************************//**
@@ -432,7 +431,6 @@ extern const char* 	TROUBLESHOOTING_MSG;
 extern const char* 	TROUBLESHOOT_DATADICT_MSG;
 extern const char* 	BUG_REPORT_MSG;
 extern const char* 	FORCE_RECOVERY_MSG;
-extern const char*      ERROR_CREATING_MSG;
 extern const char*      OPERATING_SYSTEM_ERROR_MSG;
 extern const char*      FOREIGN_KEY_CONSTRAINTS_MSG;
 extern const char*      SET_TRANSACTION_MSG;
@@ -544,32 +542,6 @@ normalize_table_name_c_low(
 	const char*	name,		/*!< in: table name string */
 	ibool		set_lower_case); /*!< in: TRUE if we want to set
 					name to lower case */
-/*************************************************************//**
-InnoDB index push-down condition check defined in ha_innodb.cc
-@return ICP_NO_MATCH, ICP_MATCH, or ICP_OUT_OF_RANGE */
-
-#include <my_compare.h>
-
-ICP_RESULT
-innobase_index_cond(
-/*================*/
-	void*	file)	/*!< in/out: pointer to ha_innobase */
-	MY_ATTRIBUTE((warn_unused_result));
-
-/******************************************************************//**
-Gets information on the durability property requested by thread.
-Used when writing either a prepare or commit record to the log
-buffer.
-@return the durability property. */
-
-#include <dur_prop.h>
-
-enum durability_properties
-thd_requested_durability(
-/*=====================*/
-	const THD* thd)	/*!< in: thread handle */
-	MY_ATTRIBUTE((warn_unused_result));
-
 /** Update the system variable with the given value of the InnoDB
 buffer pool size.
 @param[in]	buf_pool_size	given value of buffer pool size.*/

@@ -11,7 +11,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA
 
 
 OPTION(WITH_MARIABACKUP "Include mariabackup" ON)
@@ -40,9 +40,6 @@ IF(NOT HAVE_SYSTEM_REGEX)
   INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/pcre)
 ENDIF()
 
-IF(WITH_WSREP)
-  INCLUDE_DIRECTORIES(${CMAKE_SOURCE_DIR}/wsrep)
-ENDIF()
 
 ADD_DEFINITIONS(-UMYSQL_SERVER)
 ########################################################################
@@ -55,25 +52,25 @@ ELSE()
   SET(NT_SERVICE_SOURCE)
 ENDIF()
 
-ADD_DEFINITIONS(-DPCRE_STATIC=1 -DHAVE_OPENSSL=1)
-
+ADD_DEFINITIONS(-DPCRE_STATIC=1)
+ADD_DEFINITIONS(${SSL_DEFINES})
 MYSQL_ADD_EXECUTABLE(mariabackup
   xtrabackup.cc
   innobackupex.cc
   changed_page_bitmap.cc
-  datasink.c
-  ds_buffer.c
-  ds_compress.c
+  datasink.cc
+  ds_buffer.cc
+  ds_compress.cc
   ds_local.cc
-  ds_stdout.c
-  ds_tmpfile.c
-  ds_xbstream.c
+  ds_stdout.cc
+  ds_tmpfile.cc
+  ds_xbstream.cc
   fil_cur.cc
   quicklz/quicklz.c
   read_filt.cc
   write_filt.cc
   wsrep.cc
-  xbstream_write.c
+  xbstream_write.cc
   backup_mysql.cc
   backup_copy.cc
   encryption_plugin.cc
@@ -100,13 +97,13 @@ ENDIF()
 # xbstream binary
 ########################################################################
 MYSQL_ADD_EXECUTABLE(mbstream
-  ds_buffer.c
+  ds_buffer.cc
   ds_local.cc
-  ds_stdout.c
-  datasink.c
-  xbstream.c
-  xbstream_read.c
-  xbstream_write.c
+  ds_stdout.cc
+  datasink.cc
+  xbstream.cc
+  xbstream_read.cc
+  xbstream_write.cc
   COMPONENT backup
   )
 

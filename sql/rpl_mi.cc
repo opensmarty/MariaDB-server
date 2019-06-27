@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include "mariadb.h" // For HAVE_REPLICATION
 #include "sql_priv.h"
@@ -1233,7 +1233,7 @@ bool Master_info_index::init_all_master_info()
   if (!err_num) // No Error on read Master_info
   {
     if (global_system_variables.log_warnings > 1)
-      sql_print_information("Reading of all Master_info entries succeded");
+      sql_print_information("Reading of all Master_info entries succeeded");
     DBUG_RETURN(0);
   }
   if (succ_num) // Have some Error and some Success
@@ -1436,7 +1436,7 @@ bool Master_info_index::add_master_info(Master_info *mi, bool write_to_file)
     We have to protect against shutdown to ensure we are not calling
     my_hash_insert() while my_hash_free() is in progress
   */
-  if (unlikely(shutdown_in_progress) ||
+  if (unlikely(abort_loop) ||
       !my_hash_insert(&master_info_hash, (uchar*) mi))
   {
     if (global_system_variables.log_warnings > 1)
@@ -1579,7 +1579,7 @@ uint any_slave_sql_running(bool already_locked)
 
   if (!already_locked)
     mysql_mutex_lock(&LOCK_active_mi);
-  if (unlikely(shutdown_in_progress || !master_info_index))
+  if (unlikely(abort_loop || !master_info_index))
     count= 1;
   else
   {

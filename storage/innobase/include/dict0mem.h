@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2018, MariaDB Corporation.
+Copyright (c) 2013, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -14,7 +14,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -44,7 +44,6 @@ Created 1/8/1996 Heikki Tuuri
 #include "fts0fts.h"
 #include "buf0buf.h"
 #include "gis0type.h"
-#include "os0once.h"
 #include "fil0fil.h"
 #include "fil0crypt.h"
 #include <sql_const.h>
@@ -477,14 +476,7 @@ void
 dict_mem_table_free_foreign_vcol_set(
 	dict_table_t*	table);
 
-/** Create a temporary tablename like "#sql-ibtid-inc where
-  tid = the Table ID
-  inc = a randomly initialized number that is incremented for each file
-The table ID is a 64 bit integer, can use up to 20 digits, and is
-initialized at bootstrap. The second number is 32 bits, can use up to 10
-digits, and is initialized at startup to a randomly distributed number.
-It is hoped that the combination of these two numbers will provide a
-reasonably unique temporary file name.
+/** Create a temporary tablename like "#sql-ibNNN".
 @param[in]	heap	A memory heap
 @param[in]	dbtab	Table name in the form database/table name
 @param[in]	id	Table id
@@ -494,10 +486,6 @@ dict_mem_create_temporary_tablename(
 	mem_heap_t*	heap,
 	const char*	dbtab,
 	table_id_t	id);
-
-/** Initialize dict memory variables */
-void
-dict_mem_init(void);
 
 /** SQL identifier name wrapper for pretty-printing */
 class id_name_t
@@ -618,7 +606,8 @@ public:
 		ut_ad(mtype == DATA_INT || mtype == DATA_FIXBINARY);
 		return mtype == DATA_INT;
 	}
-	/** @return whether this is system versioned */
+	/** @return whether this user column (not row_start, row_end)
+		    has System Versioning property */
 	bool is_versioned() const { return !(~prtype & DATA_VERSIONED); }
 	/** @return whether this is the system version start */
 	bool vers_sys_start() const
@@ -696,7 +685,8 @@ public:
 			&& mbminlen == other.mbminlen
 			&& mbmaxlen == other.mbmaxlen
 			&& !((prtype ^ other.prtype)
-			     & ~(DATA_NOT_NULL | DATA_VERSIONED));
+			     & ~(DATA_NOT_NULL | DATA_VERSIONED
+				 | DATA_LONG_TRUE_VARCHAR));
 	}
 };
 
@@ -714,9 +704,6 @@ struct dict_v_idx_t {
 		: index(index), nth_field(nth_field) {}
 };
 
-/** Index list to put in dict_v_col_t */
-typedef	std::list<dict_v_idx_t, ut_allocator<dict_v_idx_t> >	dict_v_idx_list;
-
 /** Data structure for a virtual column in a table */
 struct dict_v_col_t{
 	/** column structure */
@@ -726,16 +713,39 @@ struct dict_v_col_t{
 	dict_col_t**		base_col;
 
 	/** number of base column */
-	ulint			num_base;
+	unsigned		num_base:10;
 
 	/** column pos in table */
-	ulint			v_pos;
+	unsigned		v_pos:10;
 
-	/** Virtual index list, and column position in the index,
-	the allocated memory is not from table->heap, nor it is
-	tracked by dict_sys->size */
-	dict_v_idx_list*	v_indexes;
+	/** number of indexes */
+	unsigned		n_v_indexes:12;
 
+	/** Virtual index list, and column position in the index */
+	std::forward_list<dict_v_idx_t, ut_allocator<dict_v_idx_t> >
+	v_indexes;
+
+	/** Detach the column from an index.
+	@param[in]	index	index to be detached from */
+	void detach(const dict_index_t& index)
+	{
+		if (!n_v_indexes) return;
+		auto i = v_indexes.before_begin();
+		ut_d(unsigned n = 0);
+		do {
+			auto prev = i++;
+			if (i == v_indexes.end()) {
+				ut_ad(n == n_v_indexes);
+				return;
+			}
+			ut_ad(++n <= n_v_indexes);
+			if (i->index == &index) {
+				v_indexes.erase_after(prev);
+				n_v_indexes--;
+				return;
+			}
+		} while (i != v_indexes.end());
+	}
 };
 
 /** Data structure for newly added virtual column in a table */
@@ -763,7 +773,8 @@ struct dict_s_col_t {
 };
 
 /** list to put stored column for create_table_info_t */
-typedef std::list<dict_s_col_t, ut_allocator<dict_s_col_t> >	dict_s_col_list;
+typedef std::forward_list<dict_s_col_t, ut_allocator<dict_s_col_t> >
+dict_s_col_list;
 
 /** @brief DICT_ANTELOPE_MAX_INDEX_COL_LEN is measured in bytes and
 is the maximum indexed column length (or indexed prefix length) in
@@ -871,17 +882,15 @@ extern ulong	zip_pad_max;
 an uncompressed page should be left as padding to avoid compression
 failures. This estimate is based on a self-adapting heuristic. */
 struct zip_pad_info_t {
-	SysMutex*	mutex;	/*!< mutex protecting the info */
-	ulint		pad;	/*!< number of bytes used as pad */
+	SysMutex	mutex;	/*!< mutex protecting the info */
+	Atomic_counter<ulint>
+			pad;	/*!< number of bytes used as pad */
 	ulint		success;/*!< successful compression ops during
 				current round */
 	ulint		failure;/*!< failed compression ops during
 				current round */
 	ulint		n_rounds;/*!< number of currently successful
 				rounds */
-	volatile os_once::state_t
-			mutex_created;
-				/*!< Creation state of mutex member */
 };
 
 /** Number of samples of data size kept when page compression fails for
@@ -957,13 +966,13 @@ struct dict_index_t {
 				dictionary cache */
 	unsigned	to_be_dropped:1;
 				/*!< TRUE if the index is to be dropped;
-				protected by dict_operation_lock */
+				protected by dict_sys.latch */
 	unsigned	online_status:2;
 				/*!< enum online_index_status.
 				Transitions from ONLINE_INDEX_COMPLETE (to
 				ONLINE_INDEX_CREATION) are protected
-				by dict_operation_lock and
-				dict_sys->mutex. Other changes are
+				by dict_sys.latch and
+				dict_sys.mutex. Other changes are
 				protected by index->lock. */
 	unsigned	uncommitted:1;
 				/*!< a flag that is set for secondary indexes
@@ -973,6 +982,8 @@ struct dict_index_t {
 #ifdef UNIV_DEBUG
 	/** whether this is a dummy index object */
 	bool		is_dummy;
+	/** whether btr_cur_instant_init() is in progress */
+	bool		in_instant_init;
 	uint32_t	magic_n;/*!< magic number */
 /** Value of dict_index_t::magic_n */
 # define DICT_INDEX_MAGIC_N	76789786
@@ -1205,25 +1216,21 @@ struct dict_index_t {
 
 	/** Reconstruct the clustered index fields. */
 	inline void reconstruct_fields();
+
+	/** Check if the index contains a column or a prefix of that column.
+	@param[in]	n		column number
+	@param[in]	is_virtual	whether it is a virtual col
+	@return whether the index contains the column or its prefix */
+	bool contains_col_or_prefix(ulint n, bool is_virtual) const
+	MY_ATTRIBUTE((warn_unused_result));
 };
 
 /** Detach a column from an index.
 @param[in]	index	index to be detached from */
 inline void dict_col_t::detach(const dict_index_t& index)
 {
-	if (!is_virtual()) {
-		return;
-	}
-
-	if (dict_v_idx_list* v_indexes = reinterpret_cast<const dict_v_col_t*>
-	    (this)->v_indexes) {
-		for (dict_v_idx_list::iterator i = v_indexes->begin();
-		     i != v_indexes->end(); i++) {
-			if (i->index == &index) {
-				v_indexes->erase(i);
-				return;
-			}
-		}
+	if (is_virtual()) {
+		reinterpret_cast<dict_v_col_t*>(this)->detach(index);
 	}
 }
 
@@ -1615,11 +1622,7 @@ struct dict_table_t {
 
 	/** Get reference count.
 	@return current value of n_ref_count */
-	inline int32 get_ref_count()
-	{
-		return my_atomic_load32_explicit(&n_ref_count,
-						 MY_MEMORY_ORDER_RELAXED);
-	}
+	inline uint32_t get_ref_count() const { return n_ref_count; }
 
 	/** Acquire the table handle. */
 	inline void acquire();
@@ -1651,6 +1654,13 @@ struct dict_table_t {
 	{
 		ut_ad(file_unreadable || space);
 		return(UNIV_LIKELY(!file_unreadable));
+	}
+
+	/** Check if a table name contains the string "/#sql"
+	which denotes temporary or intermediate tables in MariaDB. */
+	static bool is_temporary_name(const char* name)
+	{
+		return strstr(name, "/" TEMP_FILE_PREFIX) != NULL;
 	}
 
 	/** @return whether instant ALTER TABLE is in effect */
@@ -1710,8 +1720,9 @@ struct dict_table_t {
 
 	/** Adjust table metadata for instant ADD/DROP/reorder COLUMN.
 	@param[in]	table	table on which prepare_instant() was invoked
-	@param[in]	col_map	mapping from cols[] and v_cols[] to table */
-	inline void instant_column(const dict_table_t& table,
+	@param[in]	col_map	mapping from cols[] and v_cols[] to table
+	@return		whether the metadata record must be updated */
+	inline bool instant_column(const dict_table_t& table,
 				   const ulint* col_map);
 
 	/** Roll back instant_column().
@@ -1721,6 +1732,7 @@ struct dict_table_t {
 	@param[in]	old_instant		original instant structure
 	@param[in]	old_fields		original fields
 	@param[in]	old_n_fields		original number of fields
+	@param[in]	old_n_core_fields	original number of core fields
 	@param[in]	old_n_v_cols		original n_v_cols
 	@param[in]	old_v_cols		original v_cols
 	@param[in]	old_v_col_names		original v_col_names
@@ -1732,6 +1744,7 @@ struct dict_table_t {
 		dict_instant_t*	old_instant,
 		dict_field_t*	old_fields,
 		unsigned	old_n_fields,
+		unsigned	old_n_core_fields,
 		unsigned	old_n_v_cols,
 		dict_v_col_t*	old_v_cols,
 		const char*	old_v_col_names,
@@ -1749,17 +1762,17 @@ struct dict_table_t {
 	void inc_fk_checks()
 	{
 #ifdef UNIV_DEBUG
-		lint fk_checks= (lint)
+		int32_t fk_checks=
 #endif
-		my_atomic_addlint(&n_foreign_key_checks_running, 1);
+		n_foreign_key_checks_running++;
 		ut_ad(fk_checks >= 0);
 	}
 	void dec_fk_checks()
 	{
 #ifdef UNIV_DEBUG
-		lint fk_checks= (lint)
+		int32_t fk_checks=
 #endif
-		my_atomic_addlint(&n_foreign_key_checks_running, ulint(-1));
+		n_foreign_key_checks_running--;
 		ut_ad(fk_checks > 0);
 	}
 
@@ -1773,20 +1786,15 @@ private:
 public:
 	/** Id of the table. */
 	table_id_t				id;
-
-	/** Memory heap. If you allocate from this heap after the table has
-	been created then be sure to account the allocation into
-	dict_sys->size. When closing the table we do something like
-	dict_sys->size -= mem_heap_get_size(table->heap) and if that is going
-	to become negative then we would assert. Something like this should do:
-	old_size = mem_heap_get_size()
-	mem_heap_alloc()
-	new_size = mem_heap_get_size()
-	dict_sys->size += new_size - old_size. */
-	mem_heap_t*				heap;
-
+	/** Hash chain node. */
+	hash_node_t				id_hash;
 	/** Table name. */
 	table_name_t				name;
+	/** Hash chain node. */
+	hash_node_t				name_hash;
+
+	/** Memory heap */
+	mem_heap_t*				heap;
 
 	/** NULL or the directory path specified by DATA DIRECTORY. */
 	char*					data_dir_path;
@@ -1834,8 +1842,7 @@ public:
 	/** TRUE if the table is to be dropped, but not yet actually dropped
 	(could in the background drop list). It is turned on at the beginning
 	of row_drop_table_for_mysql() and turned off just before we start to
-	update system tables for the drop. It is protected by
-	dict_operation_lock. */
+	update system tables for the drop. It is protected by dict_sys.latch. */
 	unsigned				to_be_dropped:1;
 
 	/** Number of non-virtual columns defined so far. */
@@ -1908,12 +1915,6 @@ public:
 				/*!< !DICT_FRM_CONSISTENT==0 if data
 				dictionary information and
 				MySQL FRM information mismatch. */
-	/** Hash chain node. */
-	hash_node_t				name_hash;
-
-	/** Hash chain node. */
-	hash_node_t				id_hash;
-
 	/** The FTS_DOC_ID_INDEX, or NULL if no fulltext indexes exist */
 	dict_index_t*				fts_doc_id_index;
 
@@ -1938,7 +1939,7 @@ public:
 	/** Count of how many foreign key check operations are currently being
 	performed on the table. We cannot drop the table while there are
 	foreign key checks running on it. */
-	ulint					n_foreign_key_checks_running;
+	Atomic_counter<int32_t>			n_foreign_key_checks_running;
 
 	/** Transactions whose view low limit is greater than this number are
 	not allowed to store to the MySQL query cache or retrieve from it.
@@ -1960,9 +1961,6 @@ public:
 
 	/** Statistics for query optimization. @{ */
 
-	/** Creation state of 'stats_latch'. */
-	volatile os_once::state_t		stats_latch_created;
-
 	/** This latch protects:
 	dict_table_t::stat_initialized,
 	dict_table_t::stat_n_rows (*),
@@ -1974,7 +1972,7 @@ public:
 	dict_table_t::indexes*::stat_n_leaf_pages.
 	(*) Those are not always protected for
 	performance reasons. */
-	rw_lock_t*				stats_latch;
+	rw_lock_t				stats_latch;
 
 	/** TRUE if statistics have been calculated the first time after
 	database startup or table creation. */
@@ -2056,7 +2054,7 @@ public:
 
 	/** The state of the background stats thread wrt this table.
 	See BG_STAT_NONE, BG_STAT_IN_PROGRESS and BG_STAT_SHOULD_QUIT.
-	Writes are covered by dict_sys->mutex. Dirty reads are possible. */
+	Writes are covered by dict_sys.mutex. Dirty reads are possible. */
 
 	#define BG_SCRUB_IN_PROGRESS	((byte)(1 << 2))
 				/*!< BG_SCRUB_IN_PROGRESS is set in
@@ -2072,7 +2070,7 @@ public:
 
 	/** The state of the background stats thread wrt this table.
 	See BG_STAT_NONE, BG_STAT_IN_PROGRESS and BG_STAT_SHOULD_QUIT.
-	Writes are covered by dict_sys->mutex. Dirty reads are possible. */
+	Writes are covered by dict_sys.mutex. Dirty reads are possible. */
 	byte					stats_bg_flag;
 
 	bool		stats_error_printed;
@@ -2098,11 +2096,8 @@ public:
 	from a select. */
 	lock_t*					autoinc_lock;
 
-	/** Creation state of autoinc_mutex member */
-	volatile os_once::state_t		autoinc_mutex_created;
-
 	/** Mutex protecting the autoincrement counter. */
-	ib_mutex_t*				autoinc_mutex;
+	ib_mutex_t				autoinc_mutex;
 
 	/** Autoinc counter value to give to the next inserted row. */
 	ib_uint64_t				autoinc;
@@ -2138,7 +2133,7 @@ private:
 	/** Count of how many handles are opened to this table. Dropping of the
 	table is NOT allowed until this count gets to zero. MySQL does NOT
 	itself check the number of open handles at DROP. */
-	int32					n_ref_count;
+	Atomic_counter<uint32_t>		n_ref_count;
 
 public:
 	/** List of locks on the table. Protected by lock_sys.mutex. */
@@ -2162,6 +2157,11 @@ public:
 inline void dict_index_t::set_modified(mtr_t& mtr) const
 {
 	mtr.set_named_space(table->space);
+}
+
+inline bool table_name_t::is_temporary() const
+{
+	return dict_table_t::is_temporary_name(m_name);
 }
 
 inline bool dict_index_t::is_readable() const { return table->is_readable(); }
@@ -2217,6 +2217,9 @@ inline void dict_index_t::clear_instant_alter()
 		DBUG_ASSERT(!fields[i].col->is_nullable());
 	}
 #endif
+	const dict_col_t* ai_col = table->persistent_autoinc
+		? fields[table->persistent_autoinc - 1].col
+		: NULL;
 	dict_field_t* const begin = &fields[first_user_field()];
 	dict_field_t* end = &fields[n_fields];
 
@@ -2237,8 +2240,14 @@ inline void dict_index_t::clear_instant_alter()
 	n_core_fields = n_fields = n_def = end - fields;
 	n_core_null_bytes = UT_BITS_IN_BYTES(n_nullable);
 	std::sort(begin, end, [](const dict_field_t& a, const dict_field_t& b)
-		  { return a.col->ind < b.col->ind; });
+			      { return a.col->ind < b.col->ind; });
 	table->instant = NULL;
+	if (ai_col) {
+		auto a = std::find_if(begin, end,
+				      [ai_col](const dict_field_t& f)
+				      { return f.col == ai_col; });
+		table->persistent_autoinc = (a == end) ? 0 : 1 + (a - fields);
+	}
 }
 
 /** @return whether the column was instantly dropped
@@ -2272,87 +2281,6 @@ struct dict_foreign_add_to_referenced_table {
 		}
 	}
 };
-
-/** Destroy the autoinc latch of the given table.
-This function is only called from either single threaded environment
-or from a thread that has not shared the table object with other threads.
-@param[in,out]	table	table whose stats latch to destroy */
-inline
-void
-dict_table_autoinc_destroy(
-	dict_table_t*	table)
-{
-	if (table->autoinc_mutex_created == os_once::DONE
-	    && table->autoinc_mutex != NULL) {
-		mutex_free(table->autoinc_mutex);
-		UT_DELETE(table->autoinc_mutex);
-	}
-}
-
-/** Request for lazy creation of the autoinc latch of a given table.
-This function is only called from either single threaded environment
-or from a thread that has not shared the table object with other threads.
-@param[in,out]	table	table whose autoinc latch is to be created. */
-inline
-void
-dict_table_autoinc_create_lazy(
-	dict_table_t*	table)
-{
-	table->autoinc_mutex = NULL;
-	table->autoinc_mutex_created = os_once::NEVER_DONE;
-}
-
-/** Request a lazy creation of dict_index_t::zip_pad::mutex.
-This function is only called from either single threaded environment
-or from a thread that has not shared the table object with other threads.
-@param[in,out]	index	index whose zip_pad mutex is to be created */
-inline
-void
-dict_index_zip_pad_mutex_create_lazy(
-	dict_index_t*	index)
-{
-	index->zip_pad.mutex = NULL;
-	index->zip_pad.mutex_created = os_once::NEVER_DONE;
-}
-
-/** Destroy the zip_pad_mutex of the given index.
-This function is only called from either single threaded environment
-or from a thread that has not shared the table object with other threads.
-@param[in,out]	table	table whose stats latch to destroy */
-inline
-void
-dict_index_zip_pad_mutex_destroy(
-	dict_index_t*	index)
-{
-	if (index->zip_pad.mutex_created == os_once::DONE
-	    && index->zip_pad.mutex != NULL) {
-		mutex_free(index->zip_pad.mutex);
-		UT_DELETE(index->zip_pad.mutex);
-	}
-}
-
-/** Release the zip_pad_mutex of a given index.
-@param[in,out]	index	index whose zip_pad_mutex is to be released */
-inline
-void
-dict_index_zip_pad_unlock(
-	dict_index_t*	index)
-{
-	mutex_exit(index->zip_pad.mutex);
-}
-
-#ifdef UNIV_DEBUG
-/** Check if the current thread owns the autoinc_mutex of a given table.
-@param[in]	table	the autoinc_mutex belongs to this table
-@return true, if the current thread owns the autoinc_mutex, false otherwise.*/
-inline
-bool
-dict_table_autoinc_own(
-	const dict_table_t*	table)
-{
-	return(mutex_own(table->autoinc_mutex));
-}
-#endif /* UNIV_DEBUG */
 
 /** Check whether the col is used in spatial index or regular index.
 @param[in]	col	column to check

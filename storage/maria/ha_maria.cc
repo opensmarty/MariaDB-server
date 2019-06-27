@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 
 #ifdef USE_PRAGMA_IMPLEMENTATION
@@ -152,10 +152,11 @@ static void update_log_file_size(MYSQL_THD thd,
                                  struct st_mysql_sys_var *var,
                                  void *var_ptr, const void *save);
 
+/* The 4096 is there because of MariaDB privilege tables */
 static MYSQL_SYSVAR_ULONG(block_size, maria_block_size,
        PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
        "Block size to be used for Aria index pages.", 0, 0,
-       MARIA_KEY_BLOCK_LENGTH, MARIA_MIN_KEY_BLOCK_LENGTH,
+       MARIA_KEY_BLOCK_LENGTH, 4096,
        MARIA_MAX_KEY_BLOCK_LENGTH, MARIA_MIN_KEY_BLOCK_LENGTH);
 
 static MYSQL_SYSVAR_ULONG(checkpoint_interval, checkpoint_interval,
@@ -1106,92 +1107,7 @@ uint ha_maria::max_supported_key_length() const
   return maria_max_key_length();
 }
 
-
-#ifdef HAVE_REPLICATION
-int ha_maria::net_read_dump(NET * net)
-{
-  int data_fd= file->dfile.file;
-  int error= 0;
-
-  mysql_file_seek(data_fd, 0L, MY_SEEK_SET, MYF(MY_WME));
-  for (;;)
-  {
-    ulong packet_len= my_net_read(net);
-    if (!packet_len)
-      break;                                    // end of file
-    if (packet_len == packet_error)
-    {
-      sql_print_error("ha_maria::net_read_dump - read error ");
-      error= -1;
-      goto err;
-    }
-    if (mysql_file_write(data_fd, (uchar *) net->read_pos, (uint) packet_len,
-                 MYF(MY_WME | MY_FNABP)))
-    {
-      error= errno;
-      goto err;
-    }
-  }
-err:
-  return error;
-}
-
-
-int ha_maria::dump(THD * thd, int fd)
-{
-  MARIA_SHARE *share= file->s;
-  NET *net= &thd->net;
-  uint block_size= share->block_size;
-  my_off_t bytes_to_read= share->state.state.data_file_length;
-  int data_fd= file->dfile.file;
-  uchar *buf= (uchar *) my_malloc(block_size, MYF(MY_WME));
-  if (!buf)
-    return ENOMEM;
-
-  int error= 0;
-  mysql_file_seek(data_fd, 0L, MY_SEEK_SET, MYF(MY_WME));
-  for (; bytes_to_read > 0;)
-  {
-    size_t bytes= mysql_file_read(data_fd, buf, block_size, MYF(MY_WME));
-    if (bytes == MY_FILE_ERROR)
-    {
-      error= errno;
-      goto err;
-    }
-
-    if (fd >= 0)
-    {
-      if (mysql_file_write(fd, buf, bytes, MYF(MY_WME | MY_FNABP)))
-      {
-        error= errno ? errno : EPIPE;
-        goto err;
-      }
-    }
-    else
-    {
-      if (my_net_write(net, buf, bytes))
-      {
-        error= errno ? errno : EPIPE;
-        goto err;
-      }
-    }
-    bytes_to_read -= bytes;
-  }
-
-  if (fd < 0)
-  {
-    if (my_net_write(net, (uchar*) "", 0))
-      error= errno ? errno : EPIPE;
-    net_flush(net);
-  }
-
-err:
-  my_free(buf);
-  return error;
-}
-#endif                                          /* HAVE_REPLICATION */
-
-        /* Name is here without an extension */
+/* Name is here without an extension */
 
 int ha_maria::open(const char *name, int mode, uint test_if_locked)
 {
@@ -1337,6 +1253,7 @@ int ha_maria::check(THD * thd, HA_CHECK_OPT * check_opt)
 
   if (!file || !param) return HA_ADMIN_INTERNAL_ERROR;
 
+  unmap_file(file);
   maria_chk_init(param);
   param->thd= thd;
   param->op_name= "check";
@@ -1570,6 +1487,7 @@ int ha_maria::zerofill(THD * thd, HA_CHECK_OPT *check_opt)
   if (!file || !param)
     return HA_ADMIN_INTERNAL_ERROR;
 
+  unmap_file(file);
   old_trn= file->trn;
   maria_chk_init(param);
   param->thd= thd;
@@ -1668,6 +1586,7 @@ int ha_maria::repair(THD *thd, HA_CHECK *param, bool do_optimize)
   param->out_flag= 0;
   share->state.dupp_key= MI_MAX_KEY;
   strmov(fixed_name, share->open_file_name.str);
+  unmap_file(file);
 
   /*
     Don't lock tables if we have used LOCK TABLE or if we come from
@@ -1846,7 +1765,6 @@ int ha_maria::assign_to_keycache(THD * thd, HA_CHECK_OPT *check_opt)
   ulonglong map;
   TABLE_LIST *table_list= table->pos_in_table_list;
   DBUG_ENTER("ha_maria::assign_to_keycache");
-
 
   table->keys_in_use_for_query.clear_all();
 
@@ -2576,6 +2494,7 @@ int ha_maria::info(uint flag)
     stats.delete_length=     maria_info.delete_length;
     stats.check_time=        maria_info.check_time;
     stats.mean_rec_length=   maria_info.mean_reclength;
+    stats.checksum=          file->state->checksum;
   }
   if (flag & HA_STATUS_CONST)
   {
@@ -2807,7 +2726,8 @@ int ha_maria::external_lock(THD *thd, int lock_type)
     }
     else
     {
-      TRN *trn= (file->trn != &dummy_transaction_object ? file->trn : 0);
+      /* We have to test for THD_TRN to protect against implicit commits */
+      TRN *trn= (file->trn != &dummy_transaction_object && THD_TRN ? file->trn : 0);
       /* End of transaction */
 
       /*
@@ -2862,9 +2782,12 @@ int ha_maria::external_lock(THD *thd, int lock_type)
       }
     }
   } /* if transactional table */
-  DBUG_RETURN(maria_lock_database(file, !table->s->tmp_table ?
+  int result = maria_lock_database(file, !table->s->tmp_table ?
                                   lock_type : ((lock_type == F_UNLCK) ?
-                                               F_UNLCK : F_EXTRA_LCK)));
+                                               F_UNLCK : F_EXTRA_LCK));
+  if (!file->s->base.born_transactional)
+    file->state= &file->s->state.state;         // Restore state if clone
+  DBUG_RETURN(result);
 }
 
 int ha_maria::start_stmt(THD *thd, thr_lock_type lock_type)
@@ -3333,12 +3256,6 @@ int ha_maria::ft_read(uchar * buf)
   error= ft_handler->please->read_next(ft_handler, (char*) buf);
 
   return error;
-}
-
-
-uint ha_maria::checksum() const
-{
-  return (uint) file->state->checksum;
 }
 
 

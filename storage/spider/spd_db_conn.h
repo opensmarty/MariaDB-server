@@ -1,4 +1,4 @@
-/* Copyright (C) 2008-2017 Kentoku Shiba
+/* Copyright (C) 2008-2018 Kentoku Shiba
 
   This program is free software; you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
@@ -11,7 +11,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA */
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #define SPIDER_DB_WRAPPER_STR "mysql"
 #define SPIDER_DB_WRAPPER_LEN (sizeof(SPIDER_DB_WRAPPER_STR) - 1)
@@ -412,7 +412,20 @@ int spider_db_unlock_tables(
 
 int spider_db_append_name_with_quote_str(
   spider_string *str,
-  char *name,
+  const char *name,
+  uint dbton_id
+);
+
+int spider_db_append_name_with_quote_str(
+  spider_string *str,
+  LEX_CSTRING &name,
+  uint dbton_id
+);
+
+int spider_db_append_name_with_quote_str_internal(
+  spider_string *str,
+  const char *name,
+  int length,
   uint dbton_id
 );
 
@@ -457,6 +470,11 @@ int spider_db_append_key_where(
   const key_range *start_key,
   const key_range *end_key,
   ha_spider *spider
+);
+
+int spider_db_append_charset_name_before_string(
+  spider_string *str,
+  CHARSET_INFO *cs
 );
 
 #ifdef HANDLER_HAS_DIRECT_AGGREGATE
@@ -563,6 +581,10 @@ void spider_db_free_one_result_for_start_next(
 
 void spider_db_free_one_result(
   SPIDER_RESULT_LIST *result_list,
+  SPIDER_RESULT *result
+);
+
+void spider_db_free_one_quick_result(
   SPIDER_RESULT *result
 );
 
@@ -675,7 +697,14 @@ int spider_db_show_table_status(
   uint flag
 );
 
-int spider_db_show_records(
+int spider_db_simple_action(
+  uint simple_action,
+  spider_db_handler *db_handler,
+  int link_idx
+);
+
+int spider_db_simple_action(
+  uint simple_action,
   ha_spider *spider,
   int link_idx,
   bool pre_call
@@ -857,6 +886,12 @@ int spider_db_print_item_type(
   uint dbton_id,
   bool use_fields,
   spider_fields *fields
+);
+
+int spider_db_print_item_type_default(
+  Item *item,
+  ha_spider *spider,
+  spider_string *str
 );
 
 int spider_db_open_item_cond(

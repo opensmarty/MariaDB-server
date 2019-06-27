@@ -11,7 +11,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; if not, write to the Free Software
-  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 /**
   @file ha_connect.cc
@@ -170,9 +170,9 @@
 #define JSONMAX      10             // JSON Default max grp size
 
 extern "C" {
-       char version[]= "Version 1.06.0008 October 06, 2018";
+       char version[]= "Version 1.06.0009 January 27, 2019";
 #if defined(__WIN__)
-       char compver[]= "Version 1.06.0008 " __DATE__ " "  __TIME__;
+       char compver[]= "Version 1.06.0009 " __DATE__ " "  __TIME__;
        char slash= '\\';
 #else   // !__WIN__
        char slash= '/';
@@ -203,6 +203,26 @@ extern "C" {
 pthread_mutex_t parmut;
 pthread_mutex_t usrmut;
 pthread_mutex_t tblmut;
+
+#if defined(DEVELOPMENT)
+char *GetUserVariable(PGLOBAL g, const uchar *varname);
+
+char *GetUserVariable(PGLOBAL g, const uchar *varname)
+{
+	char buf[1024];
+	bool b;
+	THD *thd = current_thd;
+	CHARSET_INFO *cs = system_charset_info;
+	String *str = NULL, tmp(buf, sizeof(buf), cs);
+	HASH uvars = thd->user_vars;
+	user_var_entry *uvar = (user_var_entry*)my_hash_search(&uvars, varname, 0);
+
+	if (uvar)
+		str = uvar->val_str(&b, &tmp, NOT_FIXED_DEC);
+
+	return str ? PlugDup(g, str->ptr()) : NULL;
+}; // end of GetUserVariable
+#endif   // DEVELOPMENT
 
 /***********************************************************************/
 /*  Utility functions.                                                 */
@@ -1657,10 +1677,7 @@ bool ha_connect::GetIndexOption(KEY *kp, PCSZ opname)
 /****************************************************************************/
 bool ha_connect::IsUnique(uint n)
 {
-  TABLE_SHARE *s= (table) ? table->s : NULL;
-  KEY          kp= s->key_info[n];
-
-  return (kp.flags & 1) != 0;
+  return (table->key_info[n].flags & HA_NOSAME) != 0;
 } // end of IsUnique
 
 /****************************************************************************/
@@ -1793,7 +1810,9 @@ PCSZ ha_connect::GetDBName(PCSZ name)
 
 const char *ha_connect::GetTableName(void)
 {
-  return tshp ? tshp->table_name.str : table_share->table_name.str;
+  const char *path= tshp ? tshp->path.str : table_share->path.str;
+  const char *name= strrchr(path, slash);
+  return name ? name+1 : path;
 } // end of GetTableName
 
 char *ha_connect::GetPartName(void)
@@ -1912,9 +1931,11 @@ int ha_connect::OpenTable(PGLOBAL g, bool del)
         break;
       } // endswitch xmode
 
-  if (xmod != MODE_INSERT || tdbp->GetAmType() == TYPE_AM_MYSQL
-                          || tdbp->GetAmType() == TYPE_AM_ODBC
-													|| tdbp->GetAmType() == TYPE_AM_JDBC) {
+	// g->More is 1 when executing commands from triggers
+  if (!g->More && (xmod != MODE_INSERT
+		           || tdbp->GetAmType() == TYPE_AM_MYSQL
+               || tdbp->GetAmType() == TYPE_AM_ODBC
+							 || tdbp->GetAmType() == TYPE_AM_JDBC)) {
 		// Get the list of used fields (columns)
     char        *p;
     unsigned int k1, k2, n1, n2;
@@ -1926,7 +1947,7 @@ int ha_connect::OpenTable(PGLOBAL g, bool del)
     k1= k2= 0;
     n1= n2= 1;         // 1 is space for final null character
 
-    for (field= table->field; fp= *field; field++) {
+    for (field= table->field; (fp= *field); field++) {
       if (bitmap_is_set(map, fp->field_index)) {
         n1+= (fp->field_name.length + 1);
         k1++;
@@ -1942,7 +1963,7 @@ int ha_connect::OpenTable(PGLOBAL g, bool del)
     if (k1) {
       p= c1= (char*)PlugSubAlloc(g, NULL, n1);
 
-      for (field= table->field; fp= *field; field++)
+      for (field= table->field; (fp= *field); field++)
         if (bitmap_is_set(map, fp->field_index)) {
           strcpy(p, fp->field_name.str);
           p+= (fp->field_name.length + 1);
@@ -1954,7 +1975,7 @@ int ha_connect::OpenTable(PGLOBAL g, bool del)
     if (k2) {
       p= c2= (char*)PlugSubAlloc(g, NULL, n2);
 
-      for (field= table->field; fp= *field; field++)
+      for (field= table->field; (fp= *field); field++)
         if (bitmap_is_set(ump, fp->field_index)) {
           strcpy(p, fp->field_name.str);
 
@@ -1981,11 +2002,13 @@ int ha_connect::OpenTable(PGLOBAL g, bool del)
     istable= true;
 //  strmake(tname, table_name, sizeof(tname)-1);
 
+#ifdef NOT_USED_VARIABLE
     // We may be in a create index query
     if (xmod == MODE_ANY && *tdbp->GetName() != '#') {
       // The current indexes
       PIXDEF oldpix= GetIndexInfo();
       } // endif xmod
+#endif
 
   } else
     htrc("OpenTable: %s\n", g->Message);
@@ -2012,7 +2035,7 @@ bool ha_connect::CheckColumnList(PGLOBAL g)
   MY_BITMAP *map= table->read_set;
 
 	try {
-    for (field= table->field; fp= *field; field++)
+          for (field= table->field; (fp= *field); field++)
       if (bitmap_is_set(map, fp->field_index)) {
         if (!(colp= tdbp->ColDB(g, (PSZ)fp->field_name.str, 0))) {
           sprintf(g->Message, "Column %s not found in %s", 
@@ -3048,14 +3071,14 @@ PCFIL ha_connect::CheckCond(PGLOBAL g, PCFIL filp, const Item *cond)
                 strcat(s, "'}");
                 break;
                 } // endif ODBC
-
-							// fall through
+		// fall through
             case MYSQL_TYPE_DATE:
               if (tty == TYPE_AM_ODBC) {
                 strcat(s, "{d '");
                 strcat(strncat(s, res->ptr(), res->length()), "'}");
                 break;
                 } // endif ODBC
+		// fall through
 
             case MYSQL_TYPE_TIME:
               if (tty == TYPE_AM_ODBC) {
@@ -3063,6 +3086,7 @@ PCFIL ha_connect::CheckCond(PGLOBAL g, PCFIL filp, const Item *cond)
                 strcat(strncat(s, res->ptr(), res->length()), "'}");
                 break;
                 } // endif ODBC
+		// fall through
 
             case MYSQL_TYPE_VARCHAR:
               if (tty == TYPE_AM_ODBC && i) {
@@ -4187,7 +4211,7 @@ int ha_connect::rnd_pos(uchar *buf, uchar *pos)
     rc= rnd_next(buf);
 	} else {
 		PGLOBAL g = GetPlug((table) ? table->in_use : NULL, xp);
-		strcpy(g->Message, "Not supported by this table type");
+//	strcpy(g->Message, "Not supported by this table type");
 		my_message(ER_ILLEGAL_HA, g->Message, MYF(0));
 		rc= HA_ERR_INTERNAL_ERROR;
 	}	// endif SetRecpos
@@ -4251,8 +4275,6 @@ int ha_connect::info(uint flag)
 
   // tdbp must be available to get updated info
   if (xp->CheckQuery(valid_query_id) || !tdbp) {
-    PDBUSER dup= PlgGetUser(g);
-    PCATLG  cat= (dup) ? dup->Catalog : NULL;
 
     if (xmod == MODE_ANY || xmod == MODE_ALTER) {
       // Pure info, not a query
@@ -4555,12 +4577,14 @@ MODE ha_connect::CheckMode(PGLOBAL g, THD *thd,
 //      break;
 			case SQLCOM_DELETE_MULTI:
 				*cras = true;
+                                // fall through
 			case SQLCOM_DELETE:
       case SQLCOM_TRUNCATE:
         newmode= MODE_DELETE;
         break;
       case SQLCOM_UPDATE_MULTI:
 				*cras = true;
+                                // fall through
 			case SQLCOM_UPDATE:
 				newmode= MODE_UPDATE;
         break;
@@ -4570,6 +4594,7 @@ MODE ha_connect::CheckMode(PGLOBAL g, THD *thd,
         break;
       case SQLCOM_FLUSH:
         locked= 0;
+        // fall through
       case SQLCOM_DROP_TABLE:
       case SQLCOM_RENAME_TABLE:
         newmode= MODE_ANY;
@@ -4627,7 +4652,9 @@ MODE ha_connect::CheckMode(PGLOBAL g, THD *thd,
         break;
       case SQLCOM_CREATE_VIEW:
       case SQLCOM_DROP_VIEW:
-        newmode= MODE_ANY;
+			case SQLCOM_CREATE_TRIGGER:
+			case SQLCOM_DROP_TRIGGER:
+				newmode= MODE_ANY;
         break;
       case SQLCOM_ALTER_TABLE:
         *chk= true;
@@ -4697,8 +4724,24 @@ int ha_connect::start_stmt(THD *thd, thr_lock_type lock_type)
       break;
     } // endswitch mode
 
-  xmod= CheckMode(g, thd, newmode, &chk, &cras);
-  DBUG_RETURN((xmod == MODE_ERROR) ? HA_ERR_INTERNAL_ERROR : 0);
+	if (newmode == MODE_ANY) {
+		if (CloseTable(g)) {
+			// Make error a warning to avoid crash
+			push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 0, g->Message);
+			rc = 0;
+		} // endif Close
+
+		locked = 0;
+		xmod = MODE_ANY;              // For info commands
+		DBUG_RETURN(rc);
+	} // endif MODE_ANY
+
+	newmode = CheckMode(g, thd, newmode, &chk, &cras);
+
+	if (newmode == MODE_ERROR)
+		DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+
+	DBUG_RETURN(check_stmt(g, newmode, cras));
 } // end of start_stmt
 
 /**
@@ -4880,21 +4923,16 @@ int ha_connect::external_lock(THD *thd, int lock_type)
       // Make it a warning to avoid crash
       push_warning(thd, Sql_condition::WARN_LEVEL_WARN, 0, g->Message);
       rc= 0;
-			//my_message(ER_UNKNOWN_ERROR, g->Message, MYF(0));
-			//rc = HA_ERR_INTERNAL_ERROR;
 		} // endif Close
 
     locked= 0;
-//	m_lock_type= lock_type;
     xmod= MODE_ANY;              // For info commands
     DBUG_RETURN(rc);
-    } // endif MODE_ANY
-  else
-  if (check_privileges(thd, options, table->s->db.str)) {
-    strcpy(g->Message, "This operation requires the FILE privilege");
-    htrc("%s\n", g->Message);
-    DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
-    } // endif check_privileges
+	} else if (check_privileges(thd, options, table->s->db.str)) {
+		strcpy(g->Message, "This operation requires the FILE privilege");
+		htrc("%s\n", g->Message);
+		DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
+	} // endif check_privileges
 
 
   DBUG_ASSERT(table && table->s);
@@ -4905,43 +4943,31 @@ int ha_connect::external_lock(THD *thd, int lock_type)
   if (newmode == MODE_ERROR)
     DBUG_RETURN(HA_ERR_INTERNAL_ERROR);
 
-  // If this is the start of a new query, cleanup the previous one
+	DBUG_RETURN(check_stmt(g, newmode, cras));
+} // end of external_lock
+
+
+int ha_connect::check_stmt(PGLOBAL g, MODE newmode, bool cras)
+{
+	int rc = 0;
+	DBUG_ENTER("ha_connect::check_stmt");
+
+	// If this is the start of a new query, cleanup the previous one
   if (xp->CheckCleanup()) {
     tdbp= NULL;
     valid_info= false;
-    } // endif CheckCleanup
-
-#if 0
-  if (xcheck) {
-    // This must occur after CheckCleanup
-    if (!g->Xchk) {
-      g->Xchk= new(g) XCHK;
-      ((PCHK)g->Xchk)->oldsep= GetBooleanOption("Sepindex", false);
-      ((PCHK)g->Xchk)->oldpix= GetIndexInfo();
-      } // endif Xchk
-
-  } else
-    g->Xchk= NULL;
-#endif // 0
+	} // endif CheckCleanup
 
   if (cras)
     g->Createas= 1;  // To tell external tables of a multi-table command
 
-  if (trace(1)) {
-#if 0
-    htrc("xcheck=%d cras=%d\n", xcheck, cras);
-
-    if (xcheck)
-      htrc("oldsep=%d oldpix=%p\n",
-              ((PCHK)g->Xchk)->oldsep, ((PCHK)g->Xchk)->oldpix);
-#endif // 0
-    htrc("Calling CntCheckDB db=%s cras=%d\n", GetDBName(NULL), cras);
-    } // endif trace
+	if (trace(1))
+		htrc("Calling CntCheckDB db=%s cras=%d\n", GetDBName(NULL), cras);
 
   // Set or reset the good database environment
   if (CntCheckDB(g, this, GetDBName(NULL))) {
-    htrc("%p external_lock: %s\n", this, g->Message);
-    rc= HA_ERR_INTERNAL_ERROR;
+		htrc("%p check_stmt: %s\n", this, g->Message);
+		rc= HA_ERR_INTERNAL_ERROR;
   // This can NOT be called without open called first, but
   // the table can have been closed since then
   } else if (!tdbp || xp->CheckQuery(valid_query_id) || xmod != newmode) {
@@ -4961,10 +4987,10 @@ int ha_connect::external_lock(THD *thd, int lock_type)
   } // endif tdbp
 
   if (trace(1))
-    htrc("external_lock: rc=%d\n", rc);
+		htrc("check_stmt: rc=%d\n", rc);
 
   DBUG_RETURN(rc);
-} // end of external_lock
+} // end of check_stmt
 
 
 /**
@@ -5490,7 +5516,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 	PCSZ     nsp= NULL, cls= NULL;
 #endif   // __WIN__
 //int      hdr, mxe;
-	int      port = 0, mxr = 0, rc = 0, mul = 0, lrecl = 0;
+	int      port = 0, mxr __attribute__((unused)) = 0, rc = 0, mul = 0;
 //PCSZ     tabtyp = NULL;
 #if defined(ODBC_SUPPORT)
   POPARM   sop= NULL;
@@ -5514,8 +5540,6 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
   if (!g)
     return HA_ERR_INTERNAL_ERROR;
 
-  PDBUSER  dup= PlgGetUser(g);
-  PCATLG   cat= (dup) ? dup->Catalog : NULL;
   PTOS     topt= table_s->option_struct;
   char     buf[1024];
   String   sql(buf, sizeof(buf), system_charset_info);
@@ -5745,6 +5769,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 #endif   // __WIN__
 			case TAB_PIVOT:
 				supfnc = FNC_NO;
+                                // fall through
 			case TAB_PRX:
 			case TAB_TBL:
 			case TAB_XCL:
@@ -5969,7 +5994,7 @@ static int connect_assisted_discovery(handlerton *, THD* thd,
 				} // endfor crp
 
 			} else {
-				char *schem = NULL;
+                                char *schem __attribute__((unused)) = NULL;
 				char *tn = NULL;
 
 				// Not a catalog table
@@ -6993,7 +7018,7 @@ ha_connect::check_if_supported_inplace_alter(TABLE *altered_table,
     ALTER_DROP_PK_INDEX;
 
   alter_table_operations inplace_offline_operations=
-    ALTER_COLUMN_EQUAL_PACK_LENGTH |
+    ALTER_COLUMN_TYPE_CHANGE_BY_ENGINE |
     ALTER_COLUMN_NAME |
     ALTER_COLUMN_DEFAULT |
     ALTER_CHANGE_CREATE_OPTION |
@@ -7092,7 +7117,7 @@ ha_connect::check_if_supported_inplace_alter(TABLE *altered_table,
 
 #if 0
   uint table_changes= (ha_alter_info->handler_flags &
-                       ALTER_COLUMN_EQUAL_PACK_LENGTH) ?
+                       ALTER_COLUMN_TYPE_CHANGE_BY_ENGINE) ?
     IS_EQUAL_PACK_LENGTH : IS_EQUAL_YES;
 
   if (table->file->check_if_incompatible_data(create_info, table_changes)
@@ -7305,10 +7330,10 @@ maria_declare_plugin(connect)
   PLUGIN_LICENSE_GPL,
   connect_init_func,                            /* Plugin Init */
   connect_done_func,                            /* Plugin Deinit */
-  0x0107,                                       /* version number (1.05) */
+  0x0106,                                       /* version number (1.06) */
   NULL,                                         /* status variables */
   connect_system_variables,                     /* system variables */
-  "1.06.0008",                                  /* string version */
+  "1.06.0009",                                  /* string version */
 	MariaDB_PLUGIN_MATURITY_STABLE                /* maturity */
 }
 maria_declare_plugin_end;

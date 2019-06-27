@@ -11,7 +11,7 @@
 # 
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA
 #
 
 INCLUDE (CheckCSourceCompiles)
@@ -53,11 +53,6 @@ IF(NOT SYSTEM_TYPE)
 ENDIF()
 
 IF(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang" AND (NOT MSVC))
-  # MySQL "canonical" GCC flags. At least -fno-rtti flag affects
-  # ABI and cannot be simply removed. 
-  SET(CMAKE_CXX_FLAGS 
-    "${CMAKE_CXX_FLAGS} -fno-rtti")
-
   IF (CMAKE_EXE_LINKER_FLAGS MATCHES " -static " 
      OR CMAKE_EXE_LINKER_FLAGS MATCHES " -static$")
      SET(HAVE_DLOPEN FALSE CACHE "Disable dlopen due to -static flag" FORCE)
@@ -196,7 +191,6 @@ CHECK_INCLUDE_FILES (inttypes.h HAVE_INTTYPES_H)
 CHECK_INCLUDE_FILES (langinfo.h HAVE_LANGINFO_H)
 CHECK_INCLUDE_FILES (link.h HAVE_LINK_H)
 CHECK_INCLUDE_FILES (linux/unistd.h HAVE_LINUX_UNISTD_H)
-CHECK_INCLUDE_FILES (linux/falloc.h HAVE_LINUX_FALLOC_H)
 CHECK_INCLUDE_FILES (limits.h HAVE_LIMITS_H)
 CHECK_INCLUDE_FILES (locale.h HAVE_LOCALE_H)
 CHECK_INCLUDE_FILES (malloc.h HAVE_MALLOC_H)
@@ -260,7 +254,7 @@ SET(CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS} -DPACKAGE=test) # b
 CHECK_INCLUDE_FILES (bfd.h BFD_H_EXISTS)
 IF(BFD_H_EXISTS)
   IF(NOT_FOR_DISTRIBUTION)
-    SET(NON_DISTRIBUTABLE_WARNING 1)
+    SET(NON_DISTRIBUTABLE_WARNING "GPLv3" CACHE INTERNAL "")
     SET(HAVE_BFD_H 1)
   ENDIF()
 ENDIF()

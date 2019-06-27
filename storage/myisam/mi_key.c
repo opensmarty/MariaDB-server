@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 /* Functions to handle keys */
 
@@ -527,6 +527,19 @@ ICP_RESULT mi_check_index_cond(register MI_INFO *info, uint keynr,
     my_errno= HA_ERR_END_OF_FILE;
   }
   return res;
+}
+
+
+int mi_check_rowid_filter(MI_INFO *info)
+{
+  return info->rowid_filter_func(info->rowid_filter_func_arg);
+}
+
+int mi_check_rowid_filter_is_active(MI_INFO *info)
+{
+  if (info->rowid_filter_is_active_func == NULL)
+    return 0;
+  return info->rowid_filter_is_active_func(info->rowid_filter_func_arg);
 }
 
 /*

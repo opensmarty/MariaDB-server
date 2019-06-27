@@ -12,25 +12,31 @@
 # 
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA
+# Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335 USA
 
 
 IF(WITH_WSREP AND NOT EMBEDDED_LIBRARY)
-  SET(WSREP_INCLUDES ${CMAKE_SOURCE_DIR}/wsrep)
   SET(WSREP_SOURCES
+    wsrep_client_service.cc
+    wsrep_high_priority_service.cc
+    wsrep_server_service.cc
+    wsrep_storage_service.cc
+    wsrep_server_state.cc
+    wsrep_utils.cc
+    wsrep_xid.cc
     wsrep_check_opts.cc
-    wsrep_hton.cc
-    wsrep_mysqld.cc 
+    wsrep_mysqld.cc
     wsrep_notify.cc
     wsrep_sst.cc
-    wsrep_utils.cc
     wsrep_var.cc
     wsrep_binlog.cc
     wsrep_applier.cc
     wsrep_thd.cc
-    wsrep_xid.cc
+    wsrep_schema.cc
+    wsrep_plugin.cc
+    service_wsrep.cc
   )
-  SET(WSREP_LIB wsrep)
+  SET(WSREP_LIB wsrep-lib wsrep_api_v26)
 ELSE()
   SET(WSREP_SOURCES wsrep_dummy.cc)
 ENDIF()
@@ -42,7 +48,6 @@ ${PCRE_INCLUDES}
 ${ZLIB_INCLUDE_DIR}
 ${SSL_INCLUDE_DIRS}
 ${CMAKE_BINARY_DIR}/sql
-${WSREP_INCLUDES}
 )
 
 
@@ -96,7 +101,7 @@ SET (SQL_SOURCE
                sql_partition.cc sql_plugin.cc sql_prepare.cc sql_rename.cc 
                debug_sync.cc
                sql_repl.cc sql_select.cc sql_show.cc sql_state.c
-               group_by_handler.cc
+               group_by_handler.cc derived_handler.cc select_handler.cc
                sql_statistics.cc sql_string.cc lex_string.h
                sql_table.cc sql_test.cc sql_trigger.cc sql_udf.cc sql_union.cc
                sql_update.cc sql_view.cc strfunc.cc table.cc thr_malloc.cc 
@@ -121,22 +126,24 @@ SET (SQL_SOURCE
                opt_index_cond_pushdown.cc opt_subselect.cc
                opt_table_elimination.cc sql_expression_cache.cc
                gcalc_slicescan.cc gcalc_tools.cc
-               threadpool_common.cc ../sql-common/mysql_async.c
+               ../sql-common/mysql_async.c
                my_apc.cc mf_iocache_encr.cc item_jsonfunc.cc
                my_json_writer.cc
                rpl_gtid.cc rpl_parallel.cc
                semisync.cc semisync_master.cc semisync_slave.cc
                semisync_master_ack_receiver.cc
-               sql_type.cc
+               sql_type.cc sql_type_json.cc
                item_windowfunc.cc sql_window.cc
 	       sql_cte.cc
                item_vers.cc
                sql_sequence.cc sql_sequence.h ha_sequence.h
                sql_tvc.cc sql_tvc.h
                opt_split.cc
+               rowid_filter.cc rowid_filter.h
+               opt_trace.cc
 	       ${WSREP_SOURCES}
                table_cache.cc encryption.cc temporary_tables.cc
-               proxy_protocol.cc backup.cc
+               proxy_protocol.cc backup.cc xa.cc
                ${CMAKE_CURRENT_BINARY_DIR}/sql_builtin.cc
                ${CMAKE_CURRENT_BINARY_DIR}/sql_yacc.cc
                ${CMAKE_CURRENT_BINARY_DIR}/sql_yacc_ora.cc
@@ -145,17 +152,21 @@ SET (SQL_SOURCE
                ${MYSYS_LIBWRAP_SOURCE}
 )
   
-IF (CMAKE_SYSTEM_NAME MATCHES "Linux" OR
-    CMAKE_SYSTEM_NAME MATCHES "Windows" OR
-    CMAKE_SYSTEM_NAME MATCHES "SunOS" OR
-    HAVE_KQUEUE)
+IF ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR
+     CMAKE_SYSTEM_NAME MATCHES "SunOS" OR
+     WIN32 OR
+     HAVE_KQUEUE)
+    AND (NOT DISABLE_THREADPOOL))
  ADD_DEFINITIONS(-DHAVE_POOL_OF_THREADS)
  IF(WIN32)
    SET(SQL_SOURCE ${SQL_SOURCE} threadpool_win.cc)
-   SET(SQL_SOURCE ${SQL_SOURCE} handle_connections_win.cc)
  ENDIF()
  SET(SQL_SOURCE ${SQL_SOURCE} threadpool_generic.cc)
+ SET(SQL_SOURCE ${SQL_SOURCE} threadpool_common.cc)
+ENDIF()
 
+IF(WIN32)
+  SET(SQL_SOURCE ${SQL_SOURCE} handle_connections_win.cc)
 ENDIF()
 
 MYSQL_ADD_PLUGIN(partition ha_partition.cc STORAGE_ENGINE DEFAULT STATIC_ONLY
@@ -440,12 +451,6 @@ IF(WIN32 AND TARGET mysqld AND NOT CMAKE_CROSSCOMPILING)
   ADD_CUSTOM_TARGET(initial_database  
     ALL
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/initdb.dep
-  )
-  INSTALL(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/data DESTINATION . 
-  COMPONENT DataFiles 
-  PATTERN "initdb.dep" EXCLUDE  
-  PATTERN "bootstrap.sql" EXCLUDE
-  PATTERN "aria*" EXCLUDE
   )
 ELSE()
   # Not windows or cross compiling, just install an empty directory

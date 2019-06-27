@@ -12,7 +12,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #include <my_global.h>
 #include <sys/statvfs.h>
@@ -149,7 +149,7 @@ maria_declare_plugin(disks)
     NULL,                              /* no status variables */
     NULL,                              /* no system variables */
     "1.0",                             /* String version representation */
-    MariaDB_PLUGIN_MATURITY_BETA       /* Maturity (see include/mysql/plugin.h)*/
+    MariaDB_PLUGIN_MATURITY_GAMMA      /* Maturity (see include/mysql/plugin.h)*/
 }
 mysql_declare_plugin_end;
 

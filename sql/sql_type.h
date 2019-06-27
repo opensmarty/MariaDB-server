@@ -14,7 +14,7 @@
 
  You should have received a copy of the GNU General Public License
  along with this program; if not, write to the Free Software
- Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #ifdef USE_PRAGMA_INTERFACE
 #pragma interface			/* gcc class implementation */
@@ -25,6 +25,7 @@
 #include "sql_array.h"
 #include "sql_const.h"
 #include "sql_time.h"
+#include "sql_type_real.h"
 #include "compat56.h"
 
 class Field;
@@ -55,6 +56,7 @@ class Item_func_neg;
 class Item_func_signed;
 class Item_func_unsigned;
 class Item_double_typecast;
+class Item_float_typecast;
 class Item_decimal_typecast;
 class Item_char_typecast;
 class Item_time_typecast;
@@ -78,8 +80,24 @@ struct Schema_specification_st;
 struct TABLE;
 struct SORT_FIELD_ATTR;
 class Vers_history_point;
+class Virtual_column_info;
 
 #define my_charset_numeric      my_charset_latin1
+
+enum protocol_send_type_t
+{
+  PROTOCOL_SEND_STRING,
+  PROTOCOL_SEND_FLOAT,
+  PROTOCOL_SEND_DOUBLE,
+  PROTOCOL_SEND_TINY,
+  PROTOCOL_SEND_SHORT,
+  PROTOCOL_SEND_LONG,
+  PROTOCOL_SEND_LONGLONG,
+  PROTOCOL_SEND_DATETIME,
+  PROTOCOL_SEND_DATE,
+  PROTOCOL_SEND_TIME
+};
+
 
 enum scalar_comparison_op
 {
@@ -481,12 +499,42 @@ public:
 };
 
 
-class VSec9: public Sec9
+class VSec9: protected Sec9
 {
   bool m_is_null;
+  Sec9& to_sec9()
+  {
+    DBUG_ASSERT(!is_null());
+    return *this;
+  }
 public:
   VSec9(THD *thd, Item *item, const char *type_str, ulonglong limit);
   bool is_null() const { return m_is_null; }
+  const Sec9& to_const_sec9() const
+  {
+    DBUG_ASSERT(!is_null());
+    return *this;
+  }
+  bool neg() const { return to_const_sec9().neg(); }
+  bool truncated() const { return to_const_sec9().truncated(); }
+  ulonglong sec() const { return to_const_sec9().sec(); }
+  long usec() const { return to_const_sec9().usec(); }
+  bool sec_to_time(MYSQL_TIME *ltime, uint dec) const
+  {
+    return to_const_sec9().sec_to_time(ltime, dec);
+  }
+  void make_truncated_warning(THD *thd, const char *type_str) const
+  {
+    return to_const_sec9().make_truncated_warning(thd, type_str);
+  }
+  Sec9 &round(uint dec)
+  {
+    return to_sec9().round(dec);
+  }
+  Sec9 &round(uint dec, time_round_mode_t mode)
+  {
+    return to_sec9().round(dec, mode);
+  }
 };
 
 
@@ -2435,6 +2483,12 @@ public:
       length(0); // safety
   }
   int save_in_field(Field *field, uint decimals) const;
+  Datetime to_datetime(THD *thd) const
+  {
+    return is_zero_datetime() ?
+           Datetime() :
+           Datetime(thd, Timestamp_or_zero_datetime(*this).tv());
+  }
   bool is_zero_datetime() const
   {
     return length() == 0;
@@ -2459,7 +2513,7 @@ public:
   Datetime to_datetime(THD *thd) const
   {
     return is_null() ? Datetime() :
-                       Datetime(thd, Timestamp_or_zero_datetime(*this).tv());
+                       Timestamp_or_zero_datetime_native::to_datetime(thd);
   }
   void to_TIME(THD *thd, MYSQL_TIME *to)
   {
@@ -3178,6 +3232,11 @@ public:
     DBUG_ASSERT(is_traditional_type());
     return field_type();
   }
+  virtual enum_field_types type_code_for_protocol() const
+  {
+    return field_type();
+  }
+  virtual protocol_send_type_t protocol_send_type() const= 0;
   virtual Item_result result_type() const= 0;
   virtual Item_result cmp_type() const= 0;
   virtual enum_mysql_timestamp_type mysql_timestamp_type() const
@@ -3221,6 +3280,7 @@ public:
   {
     return false;
   }
+  virtual uint max_octet_length() const { return 0; }
   /**
     Prepared statement long data:
     Check whether this parameter data type is compatible with long data.
@@ -3328,9 +3388,21 @@ public:
   virtual Field *make_conversion_table_field(TABLE *TABLE,
                                              uint metadata,
                                              const Field *target) const= 0;
+  /*
+    Performs the final data type validation for a UNION element,
+    after the regular "aggregation for result" was done.
+  */
+  virtual bool union_element_finalize(const Item * item) const
+  {
+    return false;
+  }
   // Automatic upgrade, e.g. for ALTER TABLE t1 FORCE
   virtual void Column_definition_implicit_upgrade(Column_definition *c) const
   { }
+  // Validate CHECK constraint after the parser
+  virtual bool Column_definition_validate_check_constraint(THD *thd,
+                                                           Column_definition *c)
+                                                           const;
   // Fix attributes after the parser
   virtual bool Column_definition_fix_attributes(Column_definition *c) const= 0;
   /*
@@ -3642,6 +3714,8 @@ public:
   virtual bool
   Item_double_typecast_fix_length_and_dec(Item_double_typecast *item) const;
   virtual bool
+  Item_float_typecast_fix_length_and_dec(Item_float_typecast *item) const;
+  virtual bool
   Item_decimal_typecast_fix_length_and_dec(Item_decimal_typecast *item) const;
   virtual bool
   Item_char_typecast_fix_length_and_dec(Item_char_typecast *item) const;
@@ -3690,6 +3764,11 @@ public:
     DBUG_ASSERT(0);
     return MYSQL_TYPE_NULL;
   };
+  protocol_send_type_t protocol_send_type() const
+  {
+    DBUG_ASSERT(0);
+    return PROTOCOL_SEND_STRING;
+  }
   Item_result result_type() const
   {
     return ROW_RESULT;
@@ -3976,6 +4055,11 @@ public:
     DBUG_ASSERT(0);
     return true;
   }
+  bool Item_float_typecast_fix_length_and_dec(Item_float_typecast *) const
+  {
+    DBUG_ASSERT(0);
+    return true;
+  }
   bool Item_decimal_typecast_fix_length_and_dec(Item_decimal_typecast *) const
   {
     DBUG_ASSERT(0);
@@ -4070,7 +4154,6 @@ public:
   void Item_update_null_value(Item *item) const;
   int Item_save_in_field(Item *item, Field *field, bool no_conversions) const;
   Item *make_const_item_for_comparison(THD *, Item *src, const Item *cmp) const;
-  Item_cache *Item_get_cache(THD *thd, const Item *item) const;
   bool set_comparator_func(Arg_comparator *cmp) const;
   bool Item_hybrid_func_fix_attributes(THD *thd,
                                        const char *name,
@@ -4091,8 +4174,6 @@ public:
   longlong Item_val_int_signed_typecast(Item *item) const;
   longlong Item_val_int_unsigned_typecast(Item *item) const;
   String *Item_func_hex_val_str_ascii(Item_func_hex *item, String *str) const;
-  String *Item_func_hybrid_field_type_val_str(Item_func_hybrid_field_type *,
-                                              String *) const;
   double Item_func_hybrid_field_type_val_real(Item_func_hybrid_field_type *)
                                               const;
   longlong Item_func_hybrid_field_type_val_int(Item_func_hybrid_field_type *)
@@ -4105,7 +4186,6 @@ public:
                                             Temporal::Warn *,
                                             MYSQL_TIME *,
                                             date_mode_t fuzzydate) const;
-  String *Item_func_min_max_val_str(Item_func_min_max *, String *) const;
   longlong Item_func_between_val_int(Item_func_between *func) const;
   cmp_item *make_cmp_item(THD *thd, CHARSET_INFO *cs) const;
   in_vector *make_in_vector(THD *, const Item_func_in *, uint nargs) const;
@@ -4127,6 +4207,10 @@ public:
 class Type_handler_decimal_result: public Type_handler_numeric
 {
 public:
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_STRING;
+  }
   Item_result result_type() const { return DECIMAL_RESULT; }
   Item_result cmp_type() const { return DECIMAL_RESULT; }
   virtual ~Type_handler_decimal_result() {};
@@ -4517,6 +4601,10 @@ class Type_handler_string_result: public Type_handler
 {
   uint Item_temporal_precision(THD *thd, Item *item, bool is_time) const;
 public:
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_STRING;
+  }
   Item_result result_type() const { return STRING_RESULT; }
   Item_result cmp_type() const { return STRING_RESULT; }
   CHARSET_INFO *charset_for_protocol(const Item *item) const;
@@ -4531,6 +4619,7 @@ public:
   void sortlength(THD *thd,
                   const Type_std_attributes *item,
                   SORT_FIELD_ATTR *attr) const;
+  bool union_element_finalize(const Item * item) const;
   bool Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *c,
@@ -4676,6 +4765,10 @@ public:
   virtual ~Type_handler_tiny() {}
   const Name name() const { return m_name_tiny; }
   enum_field_types field_type() const { return MYSQL_TYPE_TINY; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_TINY;
+  }
   const Type_limits_int *type_limits_int_by_unsigned_flag(bool unsigned_fl) const
   {
     return unsigned_fl ? &m_limits_uint8 : &m_limits_sint8;
@@ -4717,6 +4810,10 @@ public:
   virtual ~Type_handler_short() {}
   const Name name() const { return m_name_short; }
   enum_field_types field_type() const { return MYSQL_TYPE_SHORT; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_SHORT;
+  }
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
   {
     return Item_send_short(item, protocol, buf);
@@ -4758,6 +4855,10 @@ public:
   virtual ~Type_handler_long() {}
   const Name name() const { return m_name_int; }
   enum_field_types field_type() const { return MYSQL_TYPE_LONG; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_LONG;
+  }
   const Type_limits_int *type_limits_int_by_unsigned_flag(bool unsigned_fl) const
   {
     return unsigned_fl ? &m_limits_uint32 : &m_limits_sint32;
@@ -4810,6 +4911,10 @@ public:
   virtual ~Type_handler_longlong() {}
   const Name name() const { return m_name_longlong; }
   enum_field_types field_type() const { return MYSQL_TYPE_LONGLONG; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_LONGLONG;
+  }
   const Type_limits_int *type_limits_int_by_unsigned_flag(bool unsigned_fl) const
   {
     return unsigned_fl ? &m_limits_uint64 : &m_limits_sint64;
@@ -4866,6 +4971,10 @@ public:
   virtual ~Type_handler_int24() {}
   const Name name() const { return m_name_mediumint; }
   enum_field_types field_type() const { return MYSQL_TYPE_INT24; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_LONG;
+  }
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
   {
     return Item_send_long(item, protocol, buf);
@@ -4903,6 +5012,10 @@ public:
   virtual ~Type_handler_year() {}
   const Name name() const { return m_name_year; }
   enum_field_types field_type() const { return MYSQL_TYPE_YEAR; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_SHORT;
+  }
   uint32 max_display_length(const Item *item) const;
   uint32 calc_pack_length(uint32 length) const { return 1; }
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
@@ -4948,6 +5061,10 @@ public:
   virtual ~Type_handler_bit() {}
   const Name name() const { return m_name_bit; }
   enum_field_types field_type() const { return MYSQL_TYPE_BIT; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_STRING;
+  }
   uint32 max_display_length(const Item *item) const;
   uint32 calc_pack_length(uint32 length) const { return length / 8; }
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
@@ -4996,9 +5113,15 @@ public:
   virtual ~Type_handler_float() {}
   const Name name() const { return m_name_float; }
   enum_field_types field_type() const { return MYSQL_TYPE_FLOAT; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_FLOAT;
+  }
   bool type_can_have_auto_increment_attribute() const { return true; }
   uint32 max_display_length(const Item *item) const { return 25; }
   uint32 calc_pack_length(uint32 length) const { return sizeof(float); }
+  Item *create_typecast_item(THD *thd, Item *item,
+                             const Type_cast_attributes &attr) const;
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
   {
     return Item_send_float(item, protocol, buf);
@@ -5024,6 +5147,11 @@ public:
                                    uint32 flags) const;
   void Item_param_set_param_func(Item_param *param,
                                  uchar **pos, ulong len) const;
+
+  Item_cache *Item_get_cache(THD *thd, const Item *item) const;
+  String *Item_func_hybrid_field_type_val_str(Item_func_hybrid_field_type *,
+                                              String *) const;
+  String *Item_func_min_max_val_str(Item_func_min_max *, String *) const;
 };
 
 
@@ -5034,6 +5162,10 @@ public:
   virtual ~Type_handler_double() {}
   const Name name() const { return m_name_double; }
   enum_field_types field_type() const { return MYSQL_TYPE_DOUBLE; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_DOUBLE;
+  }
   bool type_can_have_auto_increment_attribute() const { return true; }
   uint32 max_display_length(const Item *item) const { return 53; }
   uint32 calc_pack_length(uint32 length) const { return sizeof(double); }
@@ -5063,6 +5195,11 @@ public:
                                    uint32 flags) const;
   void Item_param_set_param_func(Item_param *param,
                                  uchar **pos, ulong len) const;
+
+  Item_cache *Item_get_cache(THD *thd, const Item *item) const;
+  String *Item_func_hybrid_field_type_val_str(Item_func_hybrid_field_type *,
+                                              String *) const;
+  String *Item_func_min_max_val_str(Item_func_min_max *, String *) const;
 };
 
 
@@ -5073,6 +5210,10 @@ public:
   virtual ~Type_handler_time_common() { }
   const Name name() const { return m_name_time; }
   enum_field_types field_type() const { return MYSQL_TYPE_TIME; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_TIME;
+  }
   enum_mysql_timestamp_type mysql_timestamp_type() const
   {
     return MYSQL_TIMESTAMP_TIME;
@@ -5105,6 +5246,7 @@ public:
   int Item_save_in_field(Item *item, Field *field, bool no_conversions) const;
   String *print_item_value(THD *thd, Item *item, String *str) const;
   Item_cache *Item_get_cache(THD *thd, const Item *item) const;
+  longlong Item_val_int_unsigned_typecast(Item *item) const;
   bool Item_hybrid_func_fix_attributes(THD *thd,
                                        const char *name,
                                        Type_handler_hybrid_field_type *,
@@ -5229,6 +5371,10 @@ public:
   const Name name() const { return m_name_date; }
   const Type_handler *type_handler_for_comparison() const;
   enum_field_types field_type() const { return MYSQL_TYPE_DATE; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_DATE;
+  }
   enum_mysql_timestamp_type mysql_timestamp_type() const
   {
     return MYSQL_TIMESTAMP_DATE;
@@ -5318,6 +5464,10 @@ public:
   const Name name() const { return m_name_datetime; }
   const Type_handler *type_handler_for_comparison() const;
   enum_field_types field_type() const { return MYSQL_TYPE_DATETIME; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_DATETIME;
+  }
   enum_mysql_timestamp_type mysql_timestamp_type() const
   {
     return MYSQL_TIMESTAMP_DATETIME;
@@ -5427,6 +5577,10 @@ public:
   const Type_handler *type_handler_for_comparison() const;
   const Type_handler *type_handler_for_native_format() const;
   enum_field_types field_type() const { return MYSQL_TYPE_TIMESTAMP; }
+  protocol_send_type_t protocol_send_type() const
+  {
+    return PROTOCOL_SEND_DATETIME;
+  }
   enum_mysql_timestamp_type mysql_timestamp_type() const
   {
     return MYSQL_TIMESTAMP_DATETIME;
@@ -5740,6 +5894,10 @@ public:
   virtual ~Type_handler_varchar() {}
   const Name name() const { return m_name_varchar; }
   enum_field_types field_type() const { return MYSQL_TYPE_VARCHAR; }
+  enum_field_types type_code_for_protocol() const
+  {
+    return MYSQL_TYPE_VAR_STRING; // Keep things compatible for old clients
+  }
   uint32 calc_pack_length(uint32 length) const
   {
     return (length + (length < 256 ? 1: 2));
@@ -5849,6 +6007,7 @@ public:
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
+  uint max_octet_length() const { return UINT_MAX8; }
 };
 
 
@@ -5864,6 +6023,7 @@ public:
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
+  uint max_octet_length() const { return UINT_MAX24; }
 };
 
 
@@ -5881,6 +6041,7 @@ public:
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
+  uint max_octet_length() const { return UINT_MAX32; }
 };
 
 
@@ -5896,6 +6057,7 @@ public:
                           const Record_addr &addr,
                           const Type_all_attributes &attr,
                           TABLE *table) const;
+  uint max_octet_length() const { return UINT_MAX16; }
 };
 
 
@@ -5994,6 +6156,7 @@ public:
   bool Item_func_signed_fix_length_and_dec(Item_func_signed *) const;
   bool Item_func_unsigned_fix_length_and_dec(Item_func_unsigned *) const;
   bool Item_double_typecast_fix_length_and_dec(Item_double_typecast *) const;
+  bool Item_float_typecast_fix_length_and_dec(Item_float_typecast *) const;
   bool Item_decimal_typecast_fix_length_and_dec(Item_decimal_typecast *) const;
   bool Item_char_typecast_fix_length_and_dec(Item_char_typecast *) const;
   bool Item_time_typecast_fix_length_and_dec(Item_time_typecast *) const;
@@ -6236,11 +6399,6 @@ extern MYSQL_PLUGIN_IMPORT Type_handler_datetime    type_handler_datetime;
 extern MYSQL_PLUGIN_IMPORT Type_handler_datetime2   type_handler_datetime2;
 extern MYSQL_PLUGIN_IMPORT Type_handler_timestamp   type_handler_timestamp;
 extern MYSQL_PLUGIN_IMPORT Type_handler_timestamp2  type_handler_timestamp2;
-
-extern MYSQL_PLUGIN_IMPORT Type_handler_tiny_blob   type_handler_tiny_blob;
-extern MYSQL_PLUGIN_IMPORT Type_handler_blob        type_handler_blob;
-extern MYSQL_PLUGIN_IMPORT Type_handler_medium_blob type_handler_medium_blob;
-extern MYSQL_PLUGIN_IMPORT Type_handler_long_blob   type_handler_long_blob;
 
 extern MYSQL_PLUGIN_IMPORT Type_handler_interval_DDhhmmssff
   type_handler_interval_DDhhmmssff;

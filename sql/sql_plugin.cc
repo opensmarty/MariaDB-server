@@ -13,7 +13,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #include "sql_plugin.h"                         // SHOW_MY_BOOL
 #include "sql_priv.h"
@@ -2834,37 +2834,25 @@ static void update_func_double(THD *thd, struct st_mysql_sys_var *var,
   System Variables support
 ****************************************************************************/
 
-sys_var *find_sys_var_ex(THD *thd, const char *str, size_t length,
-                         bool throw_error, bool locked)
+sys_var *find_sys_var(THD *thd, const char *str, size_t length,
+                      bool throw_error)
 {
   sys_var *var;
-  sys_var_pluginvar *pi= NULL;
-  plugin_ref plugin;
-  DBUG_ENTER("find_sys_var_ex");
+  sys_var_pluginvar *pi;
+  DBUG_ENTER("find_sys_var");
   DBUG_PRINT("enter", ("var '%.*s'", (int)length, str));
 
-  if (!locked)
-    mysql_mutex_lock(&LOCK_plugin);
   mysql_prlock_rdlock(&LOCK_system_variables_hash);
   if ((var= intern_find_sys_var(str, length)) &&
       (pi= var->cast_pluginvar()))
   {
-    mysql_prlock_unlock(&LOCK_system_variables_hash);
-    LEX *lex= thd ? thd->lex : 0;
-    if (!(plugin= intern_plugin_lock(lex, plugin_int_to_ref(pi->plugin))))
+    mysql_mutex_lock(&LOCK_plugin);
+    if (!intern_plugin_lock(thd ? thd->lex : 0, plugin_int_to_ref(pi->plugin),
+                            PLUGIN_IS_READY))
       var= NULL; /* failed to lock it, it must be uninstalling */
-    else
-    if (!(plugin_state(plugin) & PLUGIN_IS_READY))
-    {
-      /* initialization not completed */
-      var= NULL;
-      intern_plugin_unlock(lex, plugin);
-    }
-  }
-  else
-    mysql_prlock_unlock(&LOCK_system_variables_hash);
-  if (!locked)
     mysql_mutex_unlock(&LOCK_plugin);
+  }
+  mysql_prlock_unlock(&LOCK_system_variables_hash);
 
   if (unlikely(!throw_error && !var))
     my_error(ER_UNKNOWN_SYSTEM_VARIABLE, MYF(0),
@@ -2872,11 +2860,6 @@ sys_var *find_sys_var_ex(THD *thd, const char *str, size_t length,
   DBUG_RETURN(var);
 }
 
-
-sys_var *find_sys_var(THD *thd, const char *str, size_t length)
-{
-  return find_sys_var_ex(thd, str, length, false, false);
-}
 
 /*
   called by register_var, construct_options and test_plugin_options.
@@ -3161,6 +3144,11 @@ void plugin_thdvar_init(THD *thd)
   thd->variables.enforced_table_plugin= NULL;
   cleanup_variables(&thd->variables);
 
+  /* This and all other variable cleanups are here for COM_CHANGE_USER :( */
+#ifndef EMBEDDED_LIBRARY
+  thd->session_tracker.sysvars.deinit(thd);
+#endif
+
   thd->variables= global_system_variables;
 
   /* we are going to allocate these lazily */
@@ -3182,6 +3170,9 @@ void plugin_thdvar_init(THD *thd)
   intern_plugin_unlock(NULL, old_enforced_table_plugin);
   mysql_mutex_unlock(&LOCK_plugin);
 
+#ifndef EMBEDDED_LIBRARY
+  thd->session_tracker.sysvars.init(thd);
+#endif
   DBUG_VOID_RETURN;
 }
 
@@ -3246,6 +3237,10 @@ void plugin_thdvar_cleanup(THD *thd)
   uint idx;
   plugin_ref *list;
   DBUG_ENTER("plugin_thdvar_cleanup");
+
+#ifndef EMBEDDED_LIBRARY
+  thd->session_tracker.sysvars.deinit(thd);
+#endif
 
   mysql_mutex_lock(&LOCK_plugin);
 
@@ -4354,25 +4349,31 @@ void wsrep_plugins_pre_init()
   members of wsrep startup threads with correct values, as these value
   were not available at the time these threads were created.
 */
+
+my_bool post_init_callback(THD *thd, void *)
+{
+  DBUG_ASSERT(!current_thd);
+  if (thd->wsrep_applier)
+  {
+    // Save options_bits as it will get overwritten in
+    // plugin_thdvar_init() (verified)
+    ulonglong option_bits_saved= thd->variables.option_bits;
+
+    set_current_thd(thd);
+    plugin_thdvar_init(thd);
+
+    // Restore option_bits
+    thd->variables.option_bits= option_bits_saved;
+  }
+  set_current_thd(0);
+  return 0;
+}
+
+
 void wsrep_plugins_post_init()
 {
-  THD *thd;
-  I_List_iterator<THD> it(threads);
-
-  while ((thd= it++))
-  {
-    if (IF_WSREP(thd->wsrep_applier,1))
-    {
-      // Save options_bits as it will get overwritten in plugin_thdvar_init()
-      ulonglong option_bits_saved= thd->variables.option_bits;
-
-      plugin_thdvar_init(thd);
-
-      // Restore option_bits
-      thd->variables.option_bits= option_bits_saved;
-    }
-  }
-
-  return;
+  mysql_mutex_lock(&LOCK_global_system_variables);
+  server_threads.iterate(post_init_callback);
+  mysql_mutex_unlock(&LOCK_global_system_variables);
 }
 #endif /* WITH_WSREP */

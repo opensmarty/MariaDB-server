@@ -10,6 +10,13 @@ set @@optimizer_switch='semijoin_with_cache=on';
 set @@optimizer_switch='outer_join_with_cache=on';
 set optimizer_switch='mrr=on,mrr_sort_keys=on,index_condition_pushdown=on';
 
+set @innodb_stats_persistent_save= @@innodb_stats_persistent;
+set @innodb_stats_persistent_sample_pages_save=
+      @@innodb_stats_persistent_sample_pages;
+
+set global innodb_stats_persistent= 1;
+set global innodb_stats_persistent_sample_pages=100;
+
 set @local_join_cache_test_optimizer_switch_default=@@optimizer_switch;
 set names utf8;
 
@@ -42,6 +49,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -55,6 +63,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -71,6 +80,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -84,6 +94,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -100,6 +111,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -114,6 +126,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -131,6 +144,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -144,6 +158,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -210,6 +225,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -223,6 +239,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -239,6 +256,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -252,6 +270,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -268,6 +287,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -281,6 +301,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -297,6 +318,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -310,6 +332,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -350,6 +373,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -363,6 +387,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -402,6 +427,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -415,6 +441,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -484,6 +511,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -497,6 +525,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -535,6 +564,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -548,6 +578,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -586,6 +617,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -599,6 +631,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -637,6 +670,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -650,6 +684,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -691,6 +726,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -704,6 +740,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -729,6 +766,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -742,6 +780,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -767,6 +806,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -780,6 +820,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -805,6 +846,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -818,6 +860,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -843,6 +886,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -856,6 +900,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -881,6 +926,7 @@ SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -894,6 +940,7 @@ SELECT City.Name, Country.Name, CountryLanguage.Language
         CountryLanguage.Percentage > 50 AND
         LENGTH(Language) < LENGTH(City.Name) - 2;
 
+--sorted_result
 SELECT City.Name, Country.Name, CountryLanguage.Language
   FROM City,Country,CountryLanguage
   WHERE City.Country=Country.Code AND
@@ -919,6 +966,7 @@ show variables like 'join_cache_level';
 
 set join_cache_level=1;
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND City.Population > 3000000;
 
@@ -940,12 +988,14 @@ set join_cache_level=6;
 
 ALTER TABLE Country MODIFY Name varchar(52) NOT NULL default '';
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
 ALTER TABLE Country MODIFY Name varchar(300) NOT NULL default '';
 
+--sorted_result
 SELECT City.Name, Country.Name FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
@@ -954,18 +1004,54 @@ ALTER TABLE Country ADD COLUMN PopulationBar text;
 UPDATE Country 
   SET PopulationBar=REPEAT('x', CAST(Population/100000 AS unsigned int));
 
+--sorted_result
 SELECT City.Name, Country.Name, Country.PopulationBar FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
 set join_buffer_size=256;
 
+--sorted_result
 SELECT City.Name, Country.Name, Country.PopulationBar FROM City,Country
   WHERE City.Country=Country.Code AND 
         Country.Name LIKE 'L%' AND City.Population > 100000;
 
 set join_cache_level=default;
 set join_buffer_size=default;
+
+
+--echo #
+--echo # MDEV-17752: Plan changes from hash_index_merge to index_merge with new optimizer defaults
+--echo #
+
+set @save_optimizer_use_condition_selectivity=@@optimizer_use_condition_selectivity;
+set @save_use_stat_tables=@@use_stat_tables;
+set optimizer_use_condition_selectivity=4;
+set use_stat_tables='preferably';
+
+use world;
+set join_cache_level=4;
+CREATE INDEX City_Name ON City(Name);
+
+--disable_result_log
+ANALYZE TABLE City, Country;
+--enable_result_log
+
+EXPLAIN
+SELECT Country.Name, Country.Population, City.Name, City.Population
+  FROM Country LEFT JOIN City
+       ON City.Country=Country.Code AND City.Population > 5000000
+   WHERE Country.Name LIKE 'C%' AND Country.Population > 10000000;
+
+EXPLAIN
+SELECT Country.Name, Country.Population, City.Name, City.Population
+  FROM Country LEFT JOIN City
+       ON City.Country=Country.Code AND
+          (City.Population > 5000000 OR City.Name LIKE 'Za%')
+  WHERE Country.Name LIKE 'C%' AND Country.Population > 10000000;
+set @@optimizer_use_condition_selectivity=@save_optimizer_use_condition_selectivity;
+set @@use_stat_tables=@save_use_stat_tables;
+set join_cache_level=default;
 
 DROP DATABASE world;
 
@@ -3886,6 +3972,8 @@ INSERT INTO t2 VALUES
  (NULL,'x'),(1,'x'),(3,'x'),(5,'x'),(8,'x'),(48,'x'),
  (228,'x'),(3,'y'),(1,'z'),(9,'z');
 
+ANALYZE TABLE t1,t2;
+
 CREATE TABLE temp
 SELECT t1.i1 AS f1, t1.v1 AS f2 FROM (t2 JOIN t1 ON (t1.v1 = t2.v1));
 
@@ -3990,3 +4078,7 @@ set join_buffer_size = default;
 
 # The following command must be the last one the file 
 set @@optimizer_switch=@save_optimizer_switch;
+
+set global innodb_stats_persistent= @innodb_stats_persistent_save;
+set global innodb_stats_persistent_sample_pages=
+             @innodb_stats_persistent_sample_pages_save;

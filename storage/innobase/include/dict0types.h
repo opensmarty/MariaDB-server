@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2015, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2017, MariaDB Corporation.
+Copyright (c) 2013, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -13,7 +13,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -30,7 +30,6 @@ Created 1/8/1996 Heikki Tuuri
 #include <ut0mutex.h>
 #include <rem0types.h>
 
-struct dict_sys_t;
 struct dict_col_t;
 struct dict_field_t;
 struct dict_index_t;
@@ -78,7 +77,10 @@ enum dict_err_ignore_t {
 					Silently load a missing
 					tablespace, and do not load
 					incomplete index definitions. */
-	DICT_ERR_IGNORE_ALL = 0xFFFF	/*!< ignore all errors */
+	/** ignore all errors above */
+	DICT_ERR_IGNORE_ALL = 15,
+	/** prepare to drop the table; do not attempt to load tablespace */
+	DICT_ERR_IGNORE_DROP = 31
 };
 
 /** Quiescing states for flushing tables to disk. */
@@ -106,6 +108,11 @@ struct table_name_t
 	/** The name in internal representation */
 	char*	m_name;
 
+	/** Default constructor */
+	table_name_t() {}
+	/** Constructor */
+	table_name_t(char* name) : m_name(name) {}
+
 	/** @return the end of the schema name */
 	const char* dbend() const
 	{
@@ -128,6 +135,9 @@ struct table_name_t
 	@return the partition name
 	@retval	NULL	if the table is not partitioned */
 	const char* part() const { return strstr(basename(), part_suffix); }
+
+	/** @return whether this is a temporary or intermediate table name */
+	inline bool is_temporary() const;
 };
 
 #if defined UNIV_DEBUG || defined UNIV_IBUF_DEBUG

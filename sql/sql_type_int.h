@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1335  USA */
 
 #ifndef SQL_TYPE_INT_INCLUDED
 #define SQL_TYPE_INT_INCLUDED
@@ -77,6 +77,22 @@ public:
     if (m_value == LONGLONG_MIN) // avoid undefined behavior
       return ((ulonglong) LONGLONG_MAX) + 1;
     return m_value < 0 ? -m_value : m_value;
+  }
+  /*
+    Convert to an unsigned number:
+    - Negative numbers are converted to 0.
+    - Positive numbers bigger than upper_bound are converted to upper_bound.
+    - Other numbers are returned as is.
+  */
+  ulonglong to_ulonglong(ulonglong upper_bound) const
+  {
+    return neg() ? 0 :
+           (ulonglong) m_value > upper_bound ? upper_bound :
+           (ulonglong) m_value;
+  }
+  uint to_uint(uint upper_bound) const
+  {
+    return (uint) to_ulonglong(upper_bound);
   }
   int cmp(const Longlong_hybrid& other) const
   {

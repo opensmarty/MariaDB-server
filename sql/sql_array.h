@@ -15,7 +15,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301  USA */
+   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #include <my_sys.h>
 
@@ -164,6 +164,19 @@ public:
   {
     return ((const Elem*)array.buffer) + array.elements - 1;
   }
+
+  /// @returns pointer to n-th element
+  Elem *get_pos(size_t idx)
+  {
+    return ((Elem*)array.buffer) + idx;
+  }
+
+  /// @returns pointer to n-th element
+  const Elem *get_pos(size_t idx) const
+  {
+    return ((const Elem*)array.buffer) + idx;
+  }
+
 
   /**
      @retval false ok

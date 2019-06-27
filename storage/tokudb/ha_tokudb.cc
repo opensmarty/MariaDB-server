@@ -3368,15 +3368,17 @@ void ha_tokudb::start_bulk_insert(ha_rows rows) {
 int ha_tokudb::bulk_insert_poll(void* extra, float progress) {
     LOADER_CONTEXT context = (LOADER_CONTEXT)extra;
     if (thd_killed(context->thd)) {
-        sprintf(context->write_status_msg,
-                "The process has been killed, aborting bulk load.");
+        snprintf(context->write_status_msg,
+                 sizeof(context->write_status_msg),
+                 "The process has been killed, aborting bulk load.");
         return ER_ABORTING_CONNECTION;
     }
     float percentage = progress * 100;
-    sprintf(context->write_status_msg,
-            "Loading of data t %s about %.1f%% done",
-            context->ha->share->full_table_name(),
-            percentage);
+    snprintf(context->write_status_msg,
+             sizeof(context->write_status_msg),
+             "Loading of data t %s about %.1f%% done",
+             context->ha->share->full_table_name(),
+             percentage);
     thd_proc_info(context->thd, context->write_status_msg);
 #ifdef HA_TOKUDB_HAS_THD_PROGRESS
     thd_progress_report(context->thd, (unsigned long long)percentage, 100);
@@ -6934,7 +6936,7 @@ void ha_tokudb::trace_create_table_info(TABLE* form) {
                 field->flags);
         }
         for (i = 0; i < form->s->keys; i++) {
-            KEY *key = &form->s->key_info[i];
+            KEY *key = &form->key_info[i];
             TOKUDB_HANDLER_TRACE(
                 "key:%d:%s:%d",
                 i,
@@ -7062,7 +7064,7 @@ int ha_tokudb::create_secondary_dictionary(
     sprintf(dict_name, "key-%s", key_info->name.str);
     make_name(newname, newname_len, name, dict_name);
 
-    prim_key = (hpk) ? NULL : &form->s->key_info[primary_key];
+    prim_key = (hpk) ? NULL : &form->key_info[primary_key];
 
     //
     // setup the row descriptor
@@ -7174,7 +7176,7 @@ int ha_tokudb::create_main_dictionary(
 
     make_name(newname, newname_len, name, "main");
 
-    prim_key = (hpk) ? NULL : &form->s->key_info[primary_key];
+    prim_key = (hpk) ? NULL : &form->key_info[primary_key];
 
     //
     // setup the row descriptor
@@ -7240,6 +7242,16 @@ int ha_tokudb::create(
     KEY_AND_COL_INFO kc_info;
     tokudb_trx_data *trx = NULL;
     THD* thd = ha_thd();
+
+    String database_name, table_name, dictionary_name;
+    tokudb_split_dname(name, database_name, table_name, dictionary_name);
+    if (database_name.is_empty() || table_name.is_empty()) {
+        push_warning_printf(thd,
+                            Sql_condition::WARN_LEVEL_WARN,
+                            ER_TABLE_NAME,
+                            "TokuDB: Table Name or Database Name is empty");
+        DBUG_RETURN(ER_TABLE_NAME);
+    }
 
     memset(&kc_info, 0, sizeof(kc_info));
 
@@ -7429,7 +7441,7 @@ int ha_tokudb::create(
 
             error = write_key_name_to_status(
                 status_block,
-                form->s->key_info[i].name.str,
+                form->key_info[i].name.str,
                 txn);
             if (error) {
                 goto cleanup;
@@ -7775,13 +7787,18 @@ double ha_tokudb::scan_time() {
     DBUG_RETURN(ret_val);
 }
 
+bool ha_tokudb::is_clustering_key(uint index)
+{
+    return index == primary_key || key_is_clustering(&table->key_info[index]);
+}
+
 double ha_tokudb::keyread_time(uint index, uint ranges, ha_rows rows)
 {
     TOKUDB_HANDLER_DBUG_ENTER("%u %u %" PRIu64, index, ranges, (uint64_t) rows);
-    double ret_val;
-    if (index == primary_key || key_is_clustering(&table->key_info[index])) {
-        ret_val = read_time(index, ranges, rows);
-        DBUG_RETURN(ret_val);
+    double cost;
+    if (index == primary_key || is_clustering_key(index)) {
+        cost = read_time(index, ranges, rows);
+        DBUG_RETURN(cost);
     }
     /*
       It is assumed that we will read trough the whole key range and that all
@@ -7791,11 +7808,8 @@ double ha_tokudb::keyread_time(uint index, uint ranges, ha_rows rows)
       blocks read. This model does not take into account clustered indexes -
       engines that support that (e.g. InnoDB) may want to overwrite this method.
     */
-    double keys_per_block= (stats.block_size/2.0/
-                            (table->key_info[index].key_length +
-                             ref_length) + 1);
-    ret_val = (rows + keys_per_block - 1)/ keys_per_block;
-    TOKUDB_HANDLER_DBUG_RETURN_DOUBLE(ret_val);
+    cost= handler::keyread_time(index, ranges, rows);
+    TOKUDB_HANDLER_DBUG_RETURN_DOUBLE(cost);
 }
 
 //
@@ -8157,7 +8171,7 @@ int ha_tokudb::tokudb_add_index(
     for (uint i = 0; i < num_of_keys; i++) {
         for (uint j = 0; j < table_arg->s->keys; j++) {
             if (strcmp(key_info[i].name.str,
-                       table_arg->s->key_info[j].name.str) == 0) {
+                       table_arg->key_info[j].name.str) == 0) {
                 error = HA_ERR_WRONG_COMMAND;
                 goto cleanup;
             }
@@ -8526,15 +8540,17 @@ cleanup:
 int ha_tokudb::tokudb_add_index_poll(void* extra, float progress) {
     LOADER_CONTEXT context = (LOADER_CONTEXT)extra;
     if (thd_killed(context->thd)) {
-        sprintf(context->write_status_msg,
-                "The process has been killed, aborting add index.");
+        snprintf(context->write_status_msg,
+                 sizeof(context->write_status_msg),
+                 "The process has been killed, aborting add index.");
         return ER_ABORTING_CONNECTION;
     }
     float percentage = progress * 100;
-    sprintf(context->write_status_msg,
-            "Adding of indexes to %s about %.1f%% done",
-            context->ha->share->full_table_name(),
-            percentage);
+    snprintf(context->write_status_msg,
+             sizeof(context->write_status_msg),
+             "Adding of indexes to %s about %.1f%% done",
+             context->ha->share->full_table_name(),
+             percentage);
     thd_proc_info(context->thd, context->write_status_msg);
 #ifdef HA_TOKUDB_HAS_THD_PROGRESS
     thd_progress_report(context->thd, (unsigned long long)percentage, 100);

@@ -5,8 +5,8 @@ MACRO(SKIP_ROCKSDB_PLUGIN msg)
   RETURN()
 ENDMACRO()
 
-IF (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rocksdb/Makefile")
-  SKIP_ROCKSDB_PLUGIN("Missing Makefile in rocksdb directory. Try \"git submodule update\".")
+IF (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rocksdb/CMakeLists.txt")
+  SKIP_ROCKSDB_PLUGIN("Missing CMakeLists.txt in rocksdb directory. Try \"git submodule update\".")
 ENDIF()
 
 CHECK_LIBRARY_EXISTS(rt timer_delete "" HAVE_TIMER_DELETE)
@@ -128,10 +128,15 @@ CHECK_CXX_SOURCE_COMPILES("
 #endif
 int main() {
   static __thread int tls;
+  tls=0;
+  return tls;
 }
 " HAVE_THREAD_LOCAL)
 if(HAVE_THREAD_LOCAL)
   ADD_DEFINITIONS(-DROCKSDB_SUPPORT_THREAD_LOCAL)
+else()
+  MESSAGE(SEND_ERROR "The compiler failed the check for ROCKSDB_SUPPORT_THREAD_LOCAL. "
+                     "MyRocks requires that feature.")
 endif()
 
 INCLUDE(build_rocksdb.cmake)
@@ -162,26 +167,6 @@ TARGET_LINK_LIBRARIES(rocksdb rocksdb_aux_lib)
   FIND_LIBRARY(LZ4_LIBRARY
     NAMES liblz4${PIC_EXT}.a lz4
     HINTS ${WITH_LZ4}/lib)
-
-IF(CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-
-  # MARIAROCKS_NOT_YET: Add -frtti flag when compiling RocksDB files.
-  # TODO: is this the right way to do this?
-  #  - SQL layer and storage/rocksdb/*.cc are compiled with -fnortti
-  #  - RocksDB files are compiled with "-fnortti ... -frtti" 
-  #  - This causes RocksDB headers to be compiled with different settings:
-  #     = with RTTI when compiling RocksDB
-  #     = without RTTI when compiling storage/rocksdb/*.cc
-  # 
-  #  (facebook/mysql-5.6 just compiles everything without -f*rtti, which means
-  #  everything is compiled with -frtti) 
-  #
-  #  (also had to add -frtti above, because something that event_listener.cc
-  #  includes requires it. So, now everything in MariaRocks is compiled with
-  #  -frtti)
-  set_source_files_properties(event_listener.cc rdb_cf_options.cc rdb_sst_info.cc
-    PROPERTIES COMPILE_FLAGS -frtti)
-ENDIF()
 
 CHECK_FUNCTION_EXISTS(sched_getcpu  HAVE_SCHED_GETCPU)
 IF(HAVE_SCHED_GETCPU)
@@ -221,11 +206,10 @@ TARGET_LINK_LIBRARIES(sst_dump rocksdblib)
 MYSQL_ADD_EXECUTABLE(mysql_ldb tools/mysql_ldb.cc COMPONENT rocksdb-engine)
 TARGET_LINK_LIBRARIES(mysql_ldb rocksdb_tools rocksdb_aux_lib dbug)
 
-INSTALL_SCRIPT(myrocks_hotbackup COMPONENT rocksdb-engine)
+CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/myrocks_hotbackup.py
+  ${CMAKE_CURRENT_BINARY_DIR}/myrocks_hotbackup @ONLY)
+INSTALL_SCRIPT(${CMAKE_CURRENT_BINARY_DIR}/myrocks_hotbackup COMPONENT rocksdb-engine)
 
-IF(CMAKE_CXX_COMPILER_ID MATCHES "GNU" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  SET_TARGET_PROPERTIES(rocksdb_tools sst_dump mysql_ldb PROPERTIES COMPILE_FLAGS -frtti)
-ENDIF()
 IF(MSVC)
   # RocksDB, the storage engine, overdoes "const" by adding
   # additional const qualifiers to parameters of the overriden virtual functions

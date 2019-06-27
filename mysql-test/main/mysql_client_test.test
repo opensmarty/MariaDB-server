@@ -2,6 +2,8 @@
 -- source include/not_embedded.inc
 # need to have the dynamic loading turned on for the client plugin tests
 --source include/have_plugin_auth.inc
+# This test is slow on buildbot.
+--source include/big_test.inc
 
 SET @old_general_log= @@global.general_log;
 SET @old_slow_query_log= @@global.slow_query_log;
@@ -32,6 +34,10 @@ echo ok;
 --echo
 --echo # cat MYSQL_TMP_DIR/test_explain_meta.out.log
 --echo # ------------------------------------
+
+# For MAX_INDEXES=128,  max_len for possible_keys column is twice as large vs MAX_INDEXES=64
+--replace_result 24576 12288
+
 --cat_file $MYSQL_TMP_DIR/test_explain_meta.out.log
 --echo # ------------------------------------
 --echo

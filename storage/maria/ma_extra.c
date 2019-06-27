@@ -11,7 +11,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #include "maria_def.h"
 #ifdef HAVE_SYS_MMAN_H
@@ -314,6 +314,8 @@ int maria_extra(MARIA_HA *info, enum ha_extra_function function,
     share->state.open_count= 1;
     share->changed= 1;
     _ma_mark_file_changed_now(share);
+    if (share->temporary)
+      break;
     /* fall through */
   case HA_EXTRA_PREPARE_FOR_RENAME:
   {

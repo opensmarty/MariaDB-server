@@ -13,7 +13,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program; see the file COPYING. If not, write to the
 # Free Software Foundation, Inc., 51 Franklin St, Fifth Floor, Boston
-# MA  02110-1301  USA.
+# MA  02110-1335  USA.
 
 # This is a reference script for mysqldump-based state snapshot tansfer
 
@@ -25,6 +25,7 @@ EINVAL=22
 local_ip()
 {
     [ "$1" = "127.0.0.1" ]      && return 0
+    [ "$1" = "127.0.0.2" ]      && return 0
     [ "$1" = "localhost" ]      && return 0
     [ "$1" = "[::1]" ]          && return 0
     [ "$1" = "$(hostname -s)" ] && return 0
@@ -138,8 +139,8 @@ then
   # turned off for the session so that gtid state does not get altered while
   # the dump gets replayed on joiner.
   if [[ "$LOG_BIN" == 'ON' ]]; then
-    RESET_MASTER="RESET MASTER;"
-    SET_GTID_BINLOG_STATE="SET @@global.gtid_binlog_state='$GTID_BINLOG_STATE';"
+    RESET_MASTER="SET GLOBAL wsrep_on=OFF; RESET MASTER; SET GLOBAL wsrep_on=ON;"
+    SET_GTID_BINLOG_STATE="SET GLOBAL wsrep_on=OFF; SET @@global.gtid_binlog_state='$GTID_BINLOG_STATE'; SET GLOBAL wsrep_on=ON;"
     SQL_LOG_BIN_OFF="SET @@session.sql_log_bin=OFF;"
   fi
 fi

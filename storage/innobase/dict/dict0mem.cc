@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2018, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2018, MariaDB Corporation.
+Copyright (c) 2013, 2019, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -14,7 +14,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 
 You should have received a copy of the GNU General Public License along with
 this program; if not, write to the Free Software Foundation, Inc.,
-51 Franklin Street, Suite 500, Boston, MA 02110-1335 USA
+51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA
 
 *****************************************************************************/
 
@@ -34,7 +34,6 @@ Created 1/8/1996 Heikki Tuuri
 #include "mach0data.h"
 #include "dict0dict.h"
 #include "fts0priv.h"
-#include "ut0crc32.h"
 #include "lock0lock.h"
 #include "sync0sync.h"
 #include "row0row.h"
@@ -81,10 +80,6 @@ const char table_name_t::part_suffix[4]
 #else
 = "#P#";
 #endif
-
-/** An interger randomly initialized at startup used to make a temporary
-table name as unuique as possible. */
-static ib_uint32_t	dict_temp_file_num;
 
 /** Display an identifier.
 @param[in,out]	s	output stream
@@ -172,16 +167,12 @@ dict_mem_table_create(
 		mem_heap_alloc(heap, table->n_cols * sizeof(dict_col_t)));
 	table->v_cols = static_cast<dict_v_col_t*>(
 		mem_heap_alloc(heap, n_v_cols * sizeof(*table->v_cols)));
-
-	/* true means that the stats latch will be enabled -
-	dict_table_stats_lock() will not be noop. */
-	dict_table_stats_latch_create(table, true);
+	for (ulint i = n_v_cols; i--; ) {
+		new (&table->v_cols[i]) dict_v_col_t();
+	}
 
 	table->autoinc_lock = static_cast<ib_lock_t*>(
 		mem_heap_alloc(heap, lock_get_size()));
-
-	/* lazy creation of table autoinc latch */
-	dict_table_autoinc_create_lazy(table);
 
 	/* If the table has an FTS index or we are in the process
 	of building one, create the table->fts */
@@ -194,6 +185,9 @@ dict_mem_table_create(
 
 	new(&table->foreign_set) dict_foreign_set();
 	new(&table->referenced_set) dict_foreign_set();
+
+	rw_lock_create(dict_table_stats_key, &table->stats_latch,
+		       SYNC_INDEX_TREE);
 
 	return(table);
 }
@@ -219,9 +213,7 @@ dict_mem_table_free(
 		}
 	}
 
-	dict_table_autoinc_destroy(table);
 	dict_mem_table_free_foreign_vcol_set(table);
-	dict_table_stats_latch_destroy(table);
 
 	table->foreign_set.~dict_foreign_set();
 	table->referenced_set.~dict_foreign_set();
@@ -232,15 +224,12 @@ dict_mem_table_free(
 	/* Clean up virtual index info structures that are registered
 	with virtual columns */
 	for (ulint i = 0; i < table->n_v_def; i++) {
-		dict_v_col_t*	vcol
-			= dict_table_get_nth_v_col(table, i);
-
-		UT_DELETE(vcol->v_indexes);
+		dict_table_get_nth_v_col(table, i)->~dict_v_col_t();
 	}
 
-	if (table->s_cols != NULL) {
-		UT_DELETE(table->s_cols);
-	}
+	UT_DELETE(table->s_cols);
+
+	rw_lock_free(&table->stats_latch);
 
 	mem_heap_free(table->heap);
 }
@@ -308,7 +297,6 @@ dict_mem_table_add_col(
 	dict_col_t*	col;
 	ulint		i;
 
-	ut_ad(table);
 	ut_ad(table->magic_n == DICT_TABLE_MAGIC_N);
 	ut_ad(!heap == !name);
 
@@ -420,7 +408,8 @@ dict_mem_table_add_v_col(
 	v_col->num_base = num_base;
 
 	/* Initialize the index list for virtual columns */
-	v_col->v_indexes = UT_NEW_NOKEY(dict_v_idx_list());
+	ut_ad(v_col->v_indexes.empty());
+	v_col->n_v_indexes = 0;
 
 	return(v_col);
 }
@@ -454,7 +443,7 @@ dict_mem_table_add_s_col(
 	}
 
 	s_col.num_base = num_base;
-	table->s_cols->push_back(s_col);
+	table->s_cols->push_front(s_col);
 }
 
 /**********************************************************************//**
@@ -483,7 +472,8 @@ dict_mem_table_col_rename_low(
 	ut_ad(to_len <= NAME_LEN);
 
 	char from[NAME_LEN + 1];
-	strncpy(from, s, NAME_LEN + 1);
+	strncpy(from, s, sizeof from - 1);
+	from[sizeof from - 1] = '\0';
 
 	if (from_len == to_len) {
 		/* The easy case: simply replace the column name in
@@ -750,17 +740,15 @@ dict_mem_index_create(
 
 	dict_mem_fill_index_struct(index, heap, index_name, type, n_fields);
 
-	dict_index_zip_pad_mutex_create_lazy(index);
+	mutex_create(LATCH_ID_ZIP_PAD_MUTEX, &index->zip_pad.mutex);
 
 	if (type & DICT_SPATIAL) {
 		mutex_create(LATCH_ID_RTR_SSN_MUTEX, &index->rtr_ssn.mutex);
-		index->rtr_track = static_cast<rtr_info_track_t*>(
-					mem_heap_alloc(
-						heap,
-						sizeof(*index->rtr_track)));
+		index->rtr_track = new
+			(mem_heap_alloc(heap, sizeof *index->rtr_track))
+			rtr_info_track_t();
 		mutex_create(LATCH_ID_RTR_ACTIVE_MUTEX,
 			     &index->rtr_track->rtr_active_mutex);
-		index->rtr_track->rtr_active = UT_NEW_NOKEY(rtr_info_active());
 	}
 
 	return(index);
@@ -868,11 +856,7 @@ dict_mem_fill_vcol_has_index(
 			continue;
 		}
 
-		dict_v_idx_list::iterator it;
-		for (it = v_col->v_indexes->begin();
-		     it != v_col->v_indexes->end(); ++it) {
-			dict_v_idx_t	v_idx = *it;
-
+		for (const auto& v_idx : v_col->v_indexes) {
 			if (v_idx.index != index) {
 				continue;
 			}
@@ -945,7 +929,7 @@ dict_mem_fill_vcol_set_for_base_col(
 			continue;
 		}
 
-		for (ulint j = 0; j < v_col->num_base; j++) {
+		for (ulint j = 0; j < unsigned{v_col->num_base}; j++) {
 			if (strcmp(col_name, dict_table_get_col_name(
 					table,
 					v_col->base_col[j]->ind)) == 0) {
@@ -1066,36 +1050,22 @@ dict_mem_index_free(
 	ut_ad(index);
 	ut_ad(index->magic_n == DICT_INDEX_MAGIC_N);
 
-	dict_index_zip_pad_mutex_destroy(index);
+	mutex_free(&index->zip_pad.mutex);
 
 	if (dict_index_is_spatial(index)) {
-		rtr_info_active::iterator	it;
-		rtr_info_t*			rtr_info;
-
-		for (it = index->rtr_track->rtr_active->begin();
-		     it != index->rtr_track->rtr_active->end(); ++it) {
-			rtr_info = *it;
-
+		for (auto& rtr_info : index->rtr_track->rtr_active) {
 			rtr_info->index = NULL;
 		}
-
 		mutex_destroy(&index->rtr_ssn.mutex);
 		mutex_destroy(&index->rtr_track->rtr_active_mutex);
-		UT_DELETE(index->rtr_track->rtr_active);
+		index->rtr_track->~rtr_info_track_t();
 	}
 
-	dict_index_remove_from_v_col_list(index);
+	index->detach_columns();
 	mem_heap_free(index->heap);
 }
 
-/** Create a temporary tablename like "#sql-ibtid-inc where
-  tid = the Table ID
-  inc = a randomly initialized number that is incremented for each file
-The table ID is a 64 bit integer, can use up to 20 digits, and is
-initialized at bootstrap. The second number is 32 bits, can use up to 10
-digits, and is initialized at startup to a randomly distributed number.
-It is hoped that the combination of these two numbers will provide a
-reasonably unique temporary file name.
+/** Create a temporary tablename like "#sql-ibNNN".
 @param[in]	heap	A memory heap
 @param[in]	dbtab	Table name in the form database/table name
 @param[in]	id	Table id
@@ -1112,33 +1082,13 @@ dict_mem_create_temporary_tablename(
 	ut_ad(dbend);
 	size_t		dblen   = size_t(dbend - dbtab) + 1;
 
-	/* Increment a randomly initialized  number for each temp file. */
-	my_atomic_add32((int32*) &dict_temp_file_num, 1);
-
-	size = dblen + (sizeof(TEMP_FILE_PREFIX) + 3 + 20 + 1 + 10);
+	size = dblen + (sizeof(TEMP_FILE_PREFIX) + 3 + 20);
 	name = static_cast<char*>(mem_heap_alloc(heap, size));
 	memcpy(name, dbtab, dblen);
 	snprintf(name + dblen, size - dblen,
-		    TEMP_FILE_PREFIX_INNODB UINT64PF "-" UINT32PF,
-		    id, dict_temp_file_num);
+		 TEMP_FILE_PREFIX_INNODB UINT64PF, id);
 
 	return(name);
-}
-
-/** Initialize dict memory variables */
-void
-dict_mem_init(void)
-{
-	/* Initialize a randomly distributed temporary file number */
-	ib_uint32_t	now = static_cast<ib_uint32_t>(ut_time());
-
-	const byte*	buf = reinterpret_cast<const byte*>(&now);
-
-	dict_temp_file_num = ut_crc32(buf, sizeof(now));
-
-	DBUG_PRINT("dict_mem_init",
-		   ("Starting Temporary file number is " UINT32PF,
-		   dict_temp_file_num));
 }
 
 /** Validate the search order in the foreign key set.

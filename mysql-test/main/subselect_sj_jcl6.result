@@ -217,7 +217,7 @@ a	b	a	b
 insert into t1 select (A.a + 10 * B.a),1 from t0 A, t0 B;
 explain extended select * from t1 where a in (select pk from t10 where pk<3);
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	filtered	Extra
-1	PRIMARY	t10	range	PRIMARY	PRIMARY	4	NULL	4	100.00	Using where; Using index
+1	PRIMARY	t10	range	PRIMARY	PRIMARY	4	NULL	3	100.00	Using where; Using index
 1	PRIMARY	t1	ALL	NULL	NULL	NULL	NULL	103	100.00	Using where; Using join buffer (flat, BNL join)
 Warnings:
 Note	1003	select `test`.`t1`.`a` AS `a`,`test`.`t1`.`b` AS `b` from `test`.`t10` join `test`.`t1` where `test`.`t1`.`a` = `test`.`t10`.`pk` and `test`.`t10`.`pk` < 3
@@ -742,7 +742,7 @@ SELECT int_key FROM ot1
 WHERE int_nokey IN (SELECT it2.int_key
 FROM it1 LEFT JOIN it2 ON it2.datetime_key);
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
-1	PRIMARY	<subquery2>	ALL	distinct_key	NULL	NULL	NULL	11	
+1	PRIMARY	<subquery2>	ALL	distinct_key	NULL	NULL	NULL	10	
 1	PRIMARY	ot1	ALL	NULL	NULL	NULL	NULL	20	Using where; Using join buffer (flat, BNL join)
 2	MATERIALIZED	it1	index	NULL	int_key	4	NULL	2	Using index
 2	MATERIALIZED	it2	ALL	int_key,datetime_key	NULL	NULL	NULL	20	Using where; Using join buffer (flat, BNL join)
@@ -1688,7 +1688,7 @@ CREATE TABLE t3 ( f11 int) ;
 INSERT IGNORE INTO t3 VALUES (0);
 SELECT alias1.f11 AS field2
 FROM ( t3 AS alias2 JOIN t1 AS alias3 ON alias3.f10 = 1)
-LEFT JOIN t2 AS alias1 ON alias3.f11 = 1
+LEFT JOIN ( t2 AS alias1 ) ON alias3.f11 = 1
 WHERE alias2.f11 IN ( SELECT f11 FROM t2 )
 GROUP BY field2 ;
 field2
@@ -2569,9 +2569,24 @@ CREATE TABLE t1 ( a INT PRIMARY KEY, b INT, KEY(b) );
 INSERT INTO t1 VALUES
 (1,2),(2,1),(3,3),(4,2),(5,5),
 (6,3),(7,1),(8,4),(9,3),(10,2);
-CREATE TABLE t2 ( c INT, d INT, UNIQUE KEY(c) );
+CREATE TABLE t2 ( c INT, d INT, KEY(c) );
 INSERT INTO t2 VALUES
 (1,2),(2,1),(3,3),(4,2),(5,5),(6,3),(7,1);
+analyze table t1,t2;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	Engine-independent statistics collected
+test.t1	analyze	status	OK
+test.t2	analyze	status	Engine-independent statistics collected
+test.t2	analyze	status	OK
+explain
+SELECT a, b, d FROM t1, t2
+WHERE ( b, d ) IN
+( SELECT b, d FROM t1, t2 WHERE b = c );
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	t2	ALL	NULL	NULL	NULL	NULL	7	
+1	PRIMARY	t1	index	b	b	5	NULL	10	Using where; Using index; LooseScan
+1	PRIMARY	t2	ref	c	c	5	test.t1.b	1	Using where; FirstMatch(t1)
+1	PRIMARY	t1	ref	b	b	5	test.t1.b	2	Using join buffer (flat, BKA join); Key-ordered Rowid-ordered scan
 SELECT a, b, d FROM t1, t2
 WHERE ( b, d ) IN
 ( SELECT b, d FROM t1, t2 WHERE b = c );
@@ -2596,6 +2611,52 @@ a	b	d
 10	2	1
 10	2	1
 DROP TABLE t1, t2;
+# Another testcase for the above that still uses LooseScan:
+create table t0(a int primary key);
+insert into t0 values (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+create table t10(a int primary key);
+insert into t10 select A.a + B.a* 10 + C.a * 100 from t0 A, t0 B, t0 C;
+create table t1 (
+pk int primary key auto_increment,
+kp1 int,
+kp2 int,
+filler char(100),
+key (kp1, kp2)
+);
+insert into t1 (kp1, kp2, filler) 
+select 
+A.a, B.a, 'filler-data'
+from t0 A, t0 B;
+create table t2 (a int, filler char(100), key(a));
+create table t3 (a int);
+insert into t3 values (1),(2);
+insert into t2 
+select (A.a+1000*B.a)/20, 'filler_data' from t10 A, t0 B;
+analyze table t1,t2,t3;
+Table	Op	Msg_type	Msg_text
+test.t1	analyze	status	Engine-independent statistics collected
+test.t1	analyze	status	Table is already up to date
+test.t2	analyze	status	Engine-independent statistics collected
+test.t2	analyze	status	Table is already up to date
+test.t3	analyze	status	Engine-independent statistics collected
+test.t3	analyze	status	OK
+delete from t1 where kp2 in (1,3);
+# Ref + LooseScan on t1:
+explain select sum(t2.a)
+from t2,t3
+where (t3.a,t2.a) in (select kp1,kp2 from t1,t0 where t0.a=2);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	PRIMARY	t0	const	PRIMARY	PRIMARY	4	const	1	Using index
+1	PRIMARY	t3	ALL	NULL	NULL	NULL	NULL	2	Using where
+1	PRIMARY	t1	ref	kp1	kp1	5	test.t3.a	10	Using where; Using index; LooseScan
+1	PRIMARY	t2	ref	a	a	5	test.t1.kp2	19	Using index
+select sum(t2.a)
+from t2,t3
+where (t3.a,t2.a) in (select kp1,kp2 from t1,t0 where t0.a=2);
+sum(t2.a)
+1640
+drop table t0,t10;
+drop table t1,t2,t3;
 #
 # BUG#920713: Wrong result (missing rows) with firstmatch+BNL, IN subquery, ...
 #
@@ -3093,9 +3154,11 @@ set optimizer_switch= @tmp_mdev6859;
 set @tmp_mdev12675=@@optimizer_switch;
 set optimizer_switch=default;
 create table t1 (a int) engine=myisam;
-insert into t1  values (5),(3),(2),(7),(2),(5),(1);
+insert into t1  values (3),(2),(7),(2),(1);
 create table t2 (b int, index idx(b)) engine=myisam;
-insert into t2 values (2),(3),(2),(1),(3),(4);
+insert into t2 values (2),(3),(2),(1),(3),(4),(1),(2),(1),(2);
+insert into t2 select b+10 from t2;
+insert into t2 select b+10 from t2;
 insert into t2 select b+10 from t2;
 insert into t2 select b+10 from t2;
 insert into t2 select b+10 from t2;
@@ -3116,15 +3179,15 @@ test.t2	analyze	status	OK
 explain
 select a from t1, t2 where b between 1 and 2 and a in (select b from t2);
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
-1	PRIMARY	t1	ALL	NULL	NULL	NULL	NULL	7	Using where
-1	PRIMARY	t2	ref	idx	idx	5	test.t1.a	256	Using index; FirstMatch(t1)
-1	PRIMARY	t2	range	idx	idx	5	NULL	2	Using where; Using index; Using join buffer (flat, BNL join)
+1	PRIMARY	t1	ALL	NULL	NULL	NULL	NULL	5	Using where
+1	PRIMARY	t2	ref	idx	idx	5	test.t1.a	1462	Using index; FirstMatch(t1)
+1	PRIMARY	t2	range	idx	idx	5	NULL	5	Using where; Using index; Using join buffer (flat, BNL join)
 explain 
 select a from t1 join t2 on b between 1 and 2 and a in (select b from t2);
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
-1	PRIMARY	t1	ALL	NULL	NULL	NULL	NULL	7	Using where
-1	PRIMARY	t2	ref	idx	idx	5	test.t1.a	256	Using index; FirstMatch(t1)
-1	PRIMARY	t2	range	idx	idx	5	NULL	2	Using where; Using index; Using join buffer (flat, BNL join)
+1	PRIMARY	t1	ALL	NULL	NULL	NULL	NULL	5	Using where
+1	PRIMARY	t2	ref	idx	idx	5	test.t1.a	1462	Using index; FirstMatch(t1)
+1	PRIMARY	t2	range	idx	idx	5	NULL	5	Using where; Using index; Using join buffer (flat, BNL join)
 drop table t1,t2;
 set optimizer_switch= @tmp_mdev12675;
 #
@@ -3206,6 +3269,14 @@ EXECUTE stmt;
 a
 drop view v3;
 drop table t1,t2,t3;
+#
+# MDEV-18896: IN subquery in WHERE of a table-less query used for INSERT
+#
+set @@optimizer_switch= @subselect_sj_tmp;
+create table t1 (a1 varchar(25));
+create table t2 (a2 varchar(25)) ;
+insert into t1 select 'xxx' from dual where 'xxx' in (select a2 from t2);
+drop table t1,t2;
 # End of 5.5 test
 set optimizer_switch=@subselect_sj_tmp;
 #
@@ -3414,7 +3485,7 @@ EXPLAIN
 SELECT a FROM t1 t WHERE a IN (SELECT b FROM t1, t2 WHERE b = a)
 GROUP BY a HAVING a != 'z';
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
-1	PRIMARY	t	index	idx_a	idx_a	4	NULL	3	Using index
+1	PRIMARY	t	range	idx_a	idx_a	4	NULL	3	Using where; Using index
 1	PRIMARY	<subquery2>	eq_ref	distinct_key	distinct_key	4	func	1	
 2	MATERIALIZED	t2	ALL	NULL	NULL	NULL	NULL	2	Using where
 2	MATERIALIZED	t1	ref	idx_a	idx_a	4	test.t2.b	2	Using index
@@ -3428,7 +3499,7 @@ EXPLAIN
 SELECT a FROM t1 t WHERE a IN (SELECT b FROM t1, t2 WHERE b = a)
 GROUP BY a HAVING a != 'z';
 id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
-1	PRIMARY	t	index	idx_a	idx_a	4	NULL	3	Using index
+1	PRIMARY	t	range	idx_a	idx_a	4	NULL	3	Using where; Using index
 1	PRIMARY	<subquery2>	eq_ref	distinct_key	distinct_key	4	func	1	
 2	MATERIALIZED	t2	ALL	NULL	NULL	NULL	NULL	2	Using where
 2	MATERIALIZED	t1	ref	idx_a	idx_a	4	test.t2.b	2	Using index

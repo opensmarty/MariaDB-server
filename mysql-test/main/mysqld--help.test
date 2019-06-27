@@ -23,7 +23,7 @@ perl;
                log-slow-queries pid-file slow-query-log-file log-basename
                datadir slave-load-tmpdir tmpdir socket thread-pool-size
                large-files-support lower-case-file-system system-time-zone
-               collation-server character-set-server log-tc-size version.*/;
+               collation-server character-set-server log-tc-size tls-version version.*/;
 
   # Plugins which may or may not be there:
   @plugins=qw/innodb archive blackhole federated partition
@@ -57,7 +57,7 @@ perl;
     # fixes for 32-bit
     s/\b4294967295\b/18446744073709551615/;
     s/\b2146435072\b/9223372036853727232/;
-    s/\b196608\b/262144/;
+    s/\b392192\b/299008/;
     s/\b4294963200\b/18446744073709547520/;
     foreach $var (@env) { s/\Q$ENV{$var}\E/$var/ }
     next if /use --skip-(use-)?symbolic-links to disable/; # for valgrind, again

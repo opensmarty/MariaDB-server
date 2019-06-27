@@ -1,3 +1,7 @@
+#ifndef THREADPOOL_H_INCLUDED
+#define THREADPOOL_H_INCLUDED
+
+#ifdef HAVE_POOL_OF_THREADS
 /* Copyright (C) 2012 Monty Program Ab
 
    This program is free software; you can redistribute it and/or modify
@@ -11,7 +15,7 @@
 
    You should have received a copy of the GNU General Public License
    along with this program; if not, write to the Free Software
-   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02111-1301 USA */
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1335 USA */
 
 #define MAX_THREAD_GROUPS 100000
 
@@ -154,3 +158,6 @@ struct TP_pool_generic :TP_pool
   virtual int set_stall_limit(uint);
   virtual int get_idle_thread_count();
 };
+
+#endif /* HAVE_POOL_OF_THREADS */
+#endif /* THREADPOOL_H_INCLUDED */
